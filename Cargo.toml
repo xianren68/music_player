@@ -1,0 +1,11 @@
+[package]
+name = "gpui_demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui = "0.2"
+gpui-component = "0.5.1"
+rfd = "0.15"
+lofty = "0.21"
+rodio = "0.20"
