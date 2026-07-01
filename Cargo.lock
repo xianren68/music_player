@@ -2372,11 +2372,14 @@ dependencies = [
 name = "gpui_demo"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "gpui",
  "gpui-component",
+ "image",
  "lofty",
  "rfd",
  "rodio",
+ "smallvec",
 ]
 
 [[package]]

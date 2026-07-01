@@ -1,132 +1,52 @@
-// ─── Windows 平台原生透明度支持 ───
-// 使用 SetWindowCompositionAttribute（与 GPUI 内部相同的 API，需动态加载）
+// ─── Windows 原生窗口透明度 ───
+use std::ffi::c_void;
 
-#[cfg(target_os = "windows")]
-mod win {
-    use std::ffi::c_void;
+type HWND = *mut c_void;
 
-    type HWND = *mut c_void;
-    type BOOL = i32;
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetWindowLongW(hWnd: HWND, nIndex: i32) -> i32;
+    fn SetWindowLongW(hWnd: HWND, nIndex: i32, dwNewLong: i32) -> i32;
+    fn SetLayeredWindowAttributes(hWnd: HWND, crKey: u32, bAlpha: u8, dwFlags: u32) -> i32;
+    fn SetWindowPos(hWnd: HWND, hWndInsertAfter: HWND, X: i32, Y: i32, cx: i32, cy: i32, uFlags: u32) -> i32;
+}
 
-    // AccentPolicy 状态
-    const ACCENT_DISABLED: i32 = 0;
-    const ACCENT_ENABLE_TRANSPARENTGRADIENT: i32 = 2;
-    // WCA_ACCENT_POLICY = 19
-    const WCA_ACCENT_POLICY: i32 = 19;
+const GWL_EXSTYLE: i32 = -20;
+const WS_EX_LAYERED: i32 = 0x00080000;
+const WS_EX_NOREDIRECTIONBITMAP: i32 = 0x00200000;
+const LWA_ALPHA: u32 = 0x00000002;
+const SWP_FRAMECHANGED: u32 = 0x0020;
+const SWP_NOMOVE: u32 = 0x0002;
+const SWP_NOSIZE: u32 = 0x0001;
+const SWP_NOZORDER: u32 = 0x0004;
 
-    /// AccentPolicy 结构体（控制窗口透明效果）
-    #[repr(C)]
-    struct AccentPolicy {
-        accent_state: i32,
-        accent_flags: i32,
-        gradient_color: i32,
-        animation_id: i32,
-    }
+/// 设置窗口 Alpha 透明度（0.0=全透明, 1.0=不透明）
+pub fn apply_alpha(hwnd: isize, alpha: f32) {
+    let hwnd = hwnd as HWND;
+    let b_alpha = (alpha.clamp(0.1, 1.0) * 255.0) as u8;
 
-    /// WINDOWCOMPOSITIONATTRIBDATA
-    #[repr(C)]
-    struct WindowCompositionAttribData {
-        attribute: i32,
-        data: *mut c_void,
-        size_of_data: u32,
-    }
-
-    unsafe extern "system" {
-        fn GetProcAddress(hmodule: *mut c_void, name: *const u8) -> *mut c_void;
-        fn GetModuleHandleW(name: *const u16) -> *mut c_void;
-    }
-
-    // 函数指针类型
-    type SetWindowCompositionAttributeFn =
-        unsafe extern "system" fn(HWND, *mut WindowCompositionAttribData) -> BOOL;
-
-    /// 动态加载 SetWindowCompositionAttribute
-    fn load_api() -> Option<SetWindowCompositionAttributeFn> {
-        unsafe {
-            // user32.dll 已经加载到进程中（GPUI 在使用它）
-            let module_name: Vec<u16> = "user32.dll\0".encode_utf16().collect();
-            let hmod = GetModuleHandleW(module_name.as_ptr());
-            if hmod.is_null() {
-                return None;
-            }
-            let name = b"SetWindowCompositionAttribute\0";
-            let ptr = GetProcAddress(hmod, name.as_ptr());
-            if ptr.is_null() {
-                return None;
-            }
-            Some(std::mem::transmute(ptr))
+    unsafe {
+        let mut ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        // 移除 WS_EX_NOREDIRECTIONBITMAP（与 WS_EX_LAYERED 冲突）
+        ex_style &= !WS_EX_NOREDIRECTIONBITMAP;
+        // 添加 WS_EX_LAYERED
+        if ex_style & WS_EX_LAYERED == 0 {
+            ex_style |= WS_EX_LAYERED;
         }
-    }
-
-    /// 设置窗口透明度（0=全透明, 100=不透明）
-    pub fn set_window_opacity(hwnd: isize, alpha_percent: u8) -> bool {
-        let Some(set_attr) = load_api() else {
-            return false;
-        };
-
-        let hwnd = hwnd as HWND;
-        // gradient_color 的高 8 位控制透明度
-        let alpha = alpha_percent as i32;
-        let gradient_color = alpha << 24;
-
-        let accent = AccentPolicy {
-            accent_state: ACCENT_ENABLE_TRANSPARENTGRADIENT,
-            accent_flags: 0,
-            gradient_color,
-            animation_id: 0,
-        };
-
-        let mut data = WindowCompositionAttribData {
-            attribute: WCA_ACCENT_POLICY,
-            data: &accent as *const AccentPolicy as *mut c_void,
-            size_of_data: std::mem::size_of::<AccentPolicy>() as u32,
-        };
-
-        let ret = unsafe { set_attr(hwnd, &mut data) };
-        ret != 0
-    }
-
-    /// 恢复不透明
-    pub fn set_window_opaque(hwnd: isize) -> bool {
-        let Some(set_attr) = load_api() else {
-            return false;
-        };
-
-        let hwnd = hwnd as HWND;
-
-        let accent = AccentPolicy {
-            accent_state: ACCENT_DISABLED,
-            accent_flags: 0,
-            gradient_color: 0,
-            animation_id: 0,
-        };
-
-        let mut data = WindowCompositionAttribData {
-            attribute: WCA_ACCENT_POLICY,
-            data: &accent as *const AccentPolicy as *mut c_void,
-            size_of_data: std::mem::size_of::<AccentPolicy>() as u32,
-        };
-
-        let ret = unsafe { set_attr(hwnd, &mut data) };
-        ret != 0
+        SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style);
+        SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        SetLayeredWindowAttributes(hwnd, 0, b_alpha, LWA_ALPHA);
     }
 }
 
-/// 设置窗口透明度（0.0 ~ 1.0），仅 Windows 平台有效
-pub fn set_opacity(hwnd: isize, opacity: f32) {
-    #[cfg(target_os = "windows")]
-    {
-        let alpha = (opacity.clamp(0.0, 1.0) * 100.0) as u8;
-        win::set_window_opacity(hwnd, alpha);
+/// 恢复不透明
+pub fn disable_alpha(hwnd: isize) {
+    let hwnd = hwnd as HWND;
+    unsafe {
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style & !WS_EX_LAYERED);
+        SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
     }
-    let _ = (hwnd, opacity);
-}
-
-/// 恢复窗口不透明
-pub fn set_opaque(hwnd: isize) {
-    #[cfg(target_os = "windows")]
-    {
-        win::set_window_opaque(hwnd);
-    }
-    let _ = hwnd;
 }
