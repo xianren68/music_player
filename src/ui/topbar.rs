@@ -10,19 +10,19 @@ pub fn build_topbar(
     cx: &mut Context<crate::MusicPlayer>,
 ) -> AnyElement {
     div().id("topbar").flex().flex_row().items_center().flex_none()
-        .h(px(40.0)).px_3()
+        .h(px(36.0)).px_4()
         .bg(Hsla { h: t.bg.h, s: t.bg.s, l: t.bg.l, a: 0.8 })
         .border_b_1().border_color(t.border)
         // ── 左侧：应用名称 ──
         .child(div().flex().items_center().gap_2()
             .child(svg().path("icons/music.svg").size_4().text_color(t.accent_light))
-            .child(div().text_xs().text_color(t.muted).child("本地音乐播放器")))
+            .child(div().text_xs().text_color(t.muted).child("Sonic — Music Player")))
         .child(div().flex_1())
         // ── 右侧：控制按钮 ──
-        .child(div().flex().items_center().gap_0p5()
+        .child(div().flex().items_center().gap_3()
             // 切换音乐库
             .child(
-                div().id("btn-toggle-lib").w(px(32.0)).h(px(28.0)).rounded_md()
+                div().id("btn-toggle-lib").w(px(28.0)).h(px(28.0)).rounded_md()
                     .flex().items_center().justify_center()
                     .text_color(if sidebar_open { t.accent_light } else { t.muted_fg })
                     .when(sidebar_open, |this| this.bg(Hsla { h: t.accent.h, s: t.accent.s, l: t.accent.l, a: 0.18 }))
@@ -34,7 +34,7 @@ pub fn build_topbar(
             )
             // 切换设置
             .child(
-                div().id("btn-toggle-set").w(px(32.0)).h(px(28.0)).rounded_md()
+                div().id("btn-toggle-set").w(px(28.0)).h(px(28.0)).rounded_md()
                     .flex().items_center().justify_center()
                     .text_color(if settings_open { t.accent_light } else { t.muted_fg })
                     .when(settings_open, |this| this.bg(Hsla { h: t.accent.h, s: t.accent.s, l: t.accent.l, a: 0.18 }))
@@ -46,7 +46,7 @@ pub fn build_topbar(
             )
             // 最小化
             .child(
-                div().id("btn-min").w(px(36.0)).h(px(28.0)).rounded_md()
+                div().id("btn-min").w(px(28.0)).h(px(28.0)).rounded_md()
                     .flex().items_center().justify_center()
                     .text_color(t.muted_fg)
                     .cursor_pointer()
@@ -56,7 +56,7 @@ pub fn build_topbar(
             )
             // 全屏
             .child(
-                div().id("btn-max").w(px(36.0)).h(px(28.0)).rounded_md()
+                div().id("btn-max").w(px(28.0)).h(px(28.0)).rounded_md()
                     .flex().items_center().justify_center()
                     .text_color(t.muted_fg)
                     .cursor_pointer()
@@ -66,7 +66,7 @@ pub fn build_topbar(
             )
             // 关闭
             .child(
-                div().id("btn-close").w(px(44.0)).h(px(28.0)).rounded_md()
+                div().id("btn-close").w(px(28.0)).h(px(28.0)).rounded_md()
                     .flex().items_center().justify_center()
                     .text_color(t.muted_fg)
                     .cursor_pointer()

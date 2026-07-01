@@ -30,15 +30,15 @@ pub fn build_settings(
         .border_l_1().border_color(t.border)
         // ── 标题栏 ──
         .child(
-            div().px_5().pt_5().pb_4().flex().items_center().gap_2()
+            div().px_5().pt_5().pb_2().flex().items_center().gap_2()
                 .child(svg().path("icons/settings.svg").size_5().text_color(t.accent_light))
                 .child(div().text_lg().font_weight(gpui::FontWeight::BOLD).text_color(t.fg).child("设置"))
         )
         // ── 内容区 ──
-        .child(div().flex_col().py_2().gap_1().overflow_hidden()
+        .child(div().flex_col().gap_1().overflow_hidden()
             // ── 外观分组 ──
             .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(t.muted_fg).px_5().mt_5().mb_1().child("外观"))
+                .text_color(t.muted_fg).px_5().mt_3().mb_1().child("外观"))
             // 暗色模式 (Switch)
             .child(div().flex().items_center().gap_3().px_5().py_2()
                 .hover(|style| style.bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.03 }))
@@ -84,8 +84,8 @@ pub fn build_settings(
                     .child(Slider::new(slider))))
 
             // ── 背景图分组 ──
-            .child(div().mt_5().text_xs().font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(t.muted_fg).px_5().mb_1().child("背景图"))
+            .child(div().pt_5().text_xs().font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(t.muted_fg).px_5().pb_1().child("背景图"))
             // 选择/清除按钮
             .child(div().flex().gap_2().px_5()
                 .child(
@@ -135,8 +135,8 @@ pub fn build_settings(
             )
 
             // ── 资料库分组 ──
-            .child(div().mt_5().text_xs().font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(t.muted_fg).px_5().mb_1().child("资料库"))
+            .child(div().pt_5().text_xs().font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(t.muted_fg).px_5().pb_1().child("资料库"))
             // 音乐文件夹
             .child(div().flex().items_center().gap_3().px_5().py_2()
                 .hover(|style| style.bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.03 }))

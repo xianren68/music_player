@@ -85,7 +85,7 @@ impl Player {
     }
 }
 
-/// 格式化时间（秒 → mm:ss）
+/// 格式化时间（秒 → m:ss）
 pub fn fmt_time(secs: f64) -> String {
-    format!("{:02}:{:02}", secs as u64 / 60, secs as u64 % 60)
+    format!("{}:{:02}", secs as u64 / 60, secs as u64 % 60)
 }

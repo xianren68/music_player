@@ -25,8 +25,7 @@ pub fn build_sidebar(
                     div().id(("t", (fi * 10000 + ti) as u64))
                         .flex().items_center().gap_3()
                         .px_3().py_2().rounded_md()
-                        .when(cur, |this| this.bg(t.active))
-                        .hover(|style| style.bg(t.hover))
+                        .hover(|style| style.bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.05 }))
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, e, w, cx| this.play_at(fi, ti, e, w, cx)))
                         // 序号
@@ -80,7 +79,7 @@ pub fn build_sidebar(
     let tabs = div().flex().gap_2().px_1()
         .child(
             div().px_3().py_1().rounded_full().text_xs().font_weight(gpui::FontWeight::MEDIUM)
-                .bg(Hsla { h: 252.0, s: 0.73, l: 0.64, a: 0.15 })
+                .bg(Hsla { h: t.accent.h, s: t.accent.s, l: t.accent.l, a: 0.15 })
                 .text_color(t.fg).child("全部")
         )
         .child(

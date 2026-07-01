@@ -34,7 +34,7 @@ impl Default for AppSettings {
             bg_blur: false,
             bg_image_path: None,
             theme_mode: "dark".into(),
-            sidebar_open: false,
+            sidebar_open: true,
             settings_open: false,
             music_folder: None,
         }

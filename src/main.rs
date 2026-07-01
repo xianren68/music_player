@@ -11,6 +11,7 @@ use gpui_component::{slider::*};
 use theme::ThemeConfig;
 use settings::AppSettings;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use models::Folder;
 use audio::Player;
@@ -27,7 +28,10 @@ struct MusicPlayer {
     sidebar_open: bool,
     settings_open: bool,
     opacity_enabled: bool,
-    progress: f64,
+    /// 播放开始时间
+    play_start: Option<Instant>,
+    /// 暂停时已播放秒数
+    play_offset: f64,
     player: Player,
     slider: Entity<SliderState>,
     _subscription: Subscription,
@@ -110,7 +114,8 @@ impl MusicPlayer {
             sidebar_open: saved.sidebar_open,
             settings_open: saved.settings_open,
             opacity_enabled: saved.opacity_enabled,
-            progress: 0.0,
+            play_start: None,
+            play_offset: 0.0,
             player: Player::new(),
             slider,
             _subscription: subscription,
@@ -122,6 +127,7 @@ impl MusicPlayer {
             bg_image_blur: saved.bg_blur,
             bg_image,
             music_folder_path: saved.music_folder.map(|s| s.into()),
+            total_time: 0.0,
         }
     }
 
@@ -161,11 +167,20 @@ impl MusicPlayer {
     fn play_pause(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
         if self.current.is_none() {
             if let Some((fi, ti)) = self.first() {
-                self.play(fi, ti);
+                self.play(fi, ti, cx);
             }
             return;
         }
-        self.player.toggle(self.playing);
+        if self.playing {
+            // 暂停：记录已播放时间
+            self.play_offset = self.current_progress();
+            self.play_start = None;
+            self.player.toggle(true);
+        } else {
+            // 继续：重置开始时间
+            self.play_start = Some(Instant::now());
+            self.player.toggle(false);
+        }
         self.playing = !self.playing;
         cx.notify();
     }
@@ -173,7 +188,7 @@ impl MusicPlayer {
     fn next(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
         if let Some((fi, ti)) = self.current {
             if let Some((f, t)) = self.next_idx(fi, ti) {
-                self.play(f, t);
+                self.play(f, t, cx);
                 cx.notify();
             }
         }
@@ -182,14 +197,14 @@ impl MusicPlayer {
     fn prev(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
         if let Some((fi, ti)) = self.current {
             if let Some((f, t)) = self.prev_idx(fi, ti) {
-                self.play(f, t);
+                self.play(f, t, cx);
                 cx.notify();
             }
         }
     }
 
     fn play_at(&mut self, fi: usize, ti: usize, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        self.play(fi, ti);
+        self.play(fi, ti, cx);
         cx.notify();
     }
 
@@ -307,16 +322,57 @@ impl MusicPlayer {
         None
     }
 
-    fn play(&mut self, fi: usize, ti: usize) {
+    fn play(&mut self, fi: usize, ti: usize, cx: &mut Context<Self>) {
         self.player.stop();
         if let Some(f) = self.folders.get(fi) {
             if let Some(t) = f.tracks.get(ti) {
                 self.player.play(t);
                 self.current = Some((fi, ti));
                 self.playing = true;
-                self.progress = 0.0;
+                self.play_offset = 0.0;
+                self.play_start = Some(Instant::now());
+                self.spawn_progress_updater(cx);
             }
         }
+    }
+
+    /// 计算当前播放进度（秒）
+    fn current_progress(&self) -> f64 {
+        let elapsed = self.play_start
+            .map(|s| s.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        (self.play_offset + elapsed).min(self.total_time())
+    }
+
+    /// 获取当前曲目总时长
+    fn total_time(&self) -> f64 {
+        self.current
+            .and_then(|(fi, ti)| self.folders.get(fi).and_then(|f| f.tracks.get(ti)))
+            .map(|t| t.duration)
+            .unwrap_or(0.0)
+    }
+
+    fn spawn_progress_updater(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_spawn(async {
+                    std::thread::sleep(Duration::from_millis(500));
+                }).await;
+
+                this.update(cx, |this, cx| {
+                    if this.playing {
+                        let progress = this.current_progress();
+                        let total = this.total_time();
+                        if total > 0.0 && progress >= total {
+                            this.playing = false;
+                            this.play_offset = 0.0;
+                            this.play_start = None;
+                        }
+                    }
+                    cx.notify();
+                }).ok();
+            }
+        }).detach();
     }
 }
 
@@ -338,11 +394,9 @@ impl Render for MusicPlayer {
             .unwrap_or_else(|| ("未播放".into(), "选择一首歌开始播放".into(), String::new()));
 
         let playing = self.playing;
-        let (cur_t, tot_t) = self.current
-            .and_then(|(fi, ti)| self.folders.get(fi).and_then(|f| f.tracks.get(ti)))
-            .map(|t| (t.duration * self.progress, t.duration))
-            .unwrap_or((0.0, 0.0));
-        let prog = self.progress;
+        let cur_t = self.current_progress();
+        let tot_t = self.total_time();
+        let prog = if tot_t > 0.0 { cur_t / tot_t } else { 0.0 };
 
         // 构建各模块
         let sidebar = ui::sidebar::build_sidebar(&self.folders, &self.current, &t, cx);
