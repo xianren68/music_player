@@ -11,7 +11,7 @@ pub fn build_topbar(
 ) -> AnyElement {
     div().id("topbar").flex().flex_row().items_center().flex_none()
         .h(px(40.0)).px_3()
-        .bg(Hsla { h: t.bg.h, s: t.bg.s, l: t.bg.l, a: 0.6 })
+        .bg(Hsla { h: t.bg.h, s: t.bg.s, l: t.bg.l, a: 0.8 })
         .border_b_1().border_color(t.border)
         // ── 左侧：应用名称 ──
         .child(div().flex().items_center().gap_2()
@@ -51,6 +51,7 @@ pub fn build_topbar(
                     .text_color(t.muted_fg)
                     .cursor_pointer()
                     .hover(|style| style.bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.08 }).text_color(t.fg))
+                    .on_click(cx.listener(crate::MusicPlayer::minimize_window))
                     .child(div().text_sm().text_color(t.muted_fg).child("−"))
             )
             // 全屏
@@ -60,6 +61,7 @@ pub fn build_topbar(
                     .text_color(t.muted_fg)
                     .cursor_pointer()
                     .hover(|style| style.bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.08 }).text_color(t.fg))
+                    .on_click(cx.listener(crate::MusicPlayer::toggle_maximize))
                     .child(svg().path("icons/fullscreen.svg").size_4().text_color(t.muted_fg))
             )
             // 关闭
@@ -69,6 +71,7 @@ pub fn build_topbar(
                     .text_color(t.muted_fg)
                     .cursor_pointer()
                     .hover(|style| style.bg(Hsla { h: 0.0, s: 0.69, l: 0.47, a: 1.0 }).text_color(rgb(0xffffff)))
+                    .on_click(cx.listener(crate::MusicPlayer::close_window))
                     .child(svg().path("icons/close.svg").size_4().text_color(t.muted_fg))
             )
         )

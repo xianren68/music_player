@@ -39,18 +39,18 @@ impl ThemeConfig {
     pub fn dark() -> Self {
         Self {
             name: "暗色".into(),
-            bg: hsla(240.0, 0.12, 0.04, 1.0),       // #0a0a0f
-            surface: hsla(240.0, 0.15, 0.08, 1.0),   // #12121a
-            fg: hsla(240.0, 0.20, 0.97, 1.0),        // #f5f5fa
-            muted: hsla(240.0, 0.15, 0.63, 1.0),     // #a0a0b8
-            muted_fg: hsla(240.0, 0.10, 0.38, 1.0),  // #5a5a72
-            accent: hsla(252.0, 0.73, 0.64, 1.0),    // #6c5ce7
-            accent_light: hsla(252.0, 0.67, 0.79, 1.0), // #a29bfe
-            active: hsla(252.0, 0.40, 0.20, 1.0),
-            hover: hsla(252.0, 0.15, 0.14, 1.0),
-            border: hsla(240.0, 0.10, 0.14, 1.0),
-            play_btn: hsla(0.0, 0.0, 1.0, 1.0),
-            play_btn_fg: hsla(240.0, 0.12, 0.04, 1.0),
+            bg: hsla(230.0, 0.20, 0.07, 1.0),       // 深冷黑
+            surface: hsla(230.0, 0.18, 0.11, 1.0),   // 表面
+            fg: hsla(0.0, 0.0, 0.93, 1.0),           // 前景白
+            muted: hsla(230.0, 0.10, 0.50, 1.0),     // 弱文字
+            muted_fg: hsla(230.0, 0.08, 0.35, 1.0),  // 更弱
+            accent: hsla(260.0, 0.85, 0.65, 1.0),    // 纯蓝紫
+            accent_light: hsla(260.0, 0.90, 0.80, 1.0), // 亮蓝紫
+            active: hsla(260.0, 0.50, 0.20, 1.0),
+            hover: hsla(260.0, 0.20, 0.13, 1.0),
+            border: hsla(230.0, 0.10, 0.16, 1.0),
+            play_btn: hsla(0.0, 0.0, 0.95, 1.0),
+            play_btn_fg: hsla(230.0, 0.20, 0.07, 1.0),
             bg_image: None,
         }
     }
@@ -59,17 +59,17 @@ impl ThemeConfig {
     pub fn light() -> Self {
         Self {
             name: "亮色".into(),
-            bg: hsla(240.0, 0.10, 0.97, 1.0),
-            surface: hsla(240.0, 0.10, 0.93, 1.0),
-            fg: hsla(240.0, 0.12, 0.08, 1.0),
-            muted: hsla(240.0, 0.10, 0.40, 1.0),
-            muted_fg: hsla(240.0, 0.08, 0.55, 1.0),
-            accent: hsla(252.0, 0.73, 0.55, 1.0),
-            accent_light: hsla(252.0, 0.67, 0.65, 1.0),
-            active: hsla(252.0, 0.20, 0.88, 1.0),
-            hover: hsla(252.0, 0.15, 0.90, 1.0),
-            border: hsla(240.0, 0.08, 0.85, 1.0),
-            play_btn: hsla(252.0, 0.73, 0.64, 1.0),
+            bg: hsla(230.0, 0.10, 0.96, 1.0),
+            surface: hsla(230.0, 0.10, 0.92, 1.0),
+            fg: hsla(230.0, 0.15, 0.10, 1.0),
+            muted: hsla(230.0, 0.10, 0.45, 1.0),
+            muted_fg: hsla(230.0, 0.08, 0.55, 1.0),
+            accent: hsla(260.0, 0.85, 0.55, 1.0),
+            accent_light: hsla(260.0, 0.90, 0.65, 1.0),
+            active: hsla(260.0, 0.25, 0.88, 1.0),
+            hover: hsla(260.0, 0.15, 0.90, 1.0),
+            border: hsla(230.0, 0.08, 0.85, 1.0),
+            play_btn: hsla(260.0, 0.85, 0.55, 1.0),
             play_btn_fg: hsla(0.0, 0.0, 1.0, 1.0),
             bg_image: None,
         }

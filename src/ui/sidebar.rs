@@ -70,7 +70,7 @@ pub fn build_sidebar(
 
     // 搜索栏
     let search_bar = div().flex().items_center().gap_2()
-        .px_3().py_2().rounded_lg()
+        .px_3().py_2().rounded_lg().mt_3()
         .bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.05 })
         .border_1().border_color(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.06 })
         .child(svg().path("icons/search.svg").size_4().text_color(t.muted_fg))
@@ -97,7 +97,7 @@ pub fn build_sidebar(
         .border_r_1().border_color(t.border)
         // 标题栏
         .child(
-            div().px_4().pt_4().pb_3().flex_col().gap_3()
+            div().px_4().pt_5().pb_4().flex_col().gap_5()
                 .child(div().flex().items_center().gap_2()
                     .child(svg().path("icons/music.svg").size_5().text_color(t.accent_light))
                     .child(div().text_lg().font_weight(gpui::FontWeight::BOLD).text_color(t.fg).child("音乐库")))
@@ -111,7 +111,7 @@ pub fn build_sidebar(
             .child(div().flex_col().gap_0p5()
                 .when(!has_folders, |this| this.child(
                     div().text_color(t.muted_fg).text_center().py_12().text_sm()
-                        .child("点击 + 添加音乐文件夹")))
+                        .child("在设置中添加音乐文件夹")))
                 .children(folder_els)))
         .into_any()
 }

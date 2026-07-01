@@ -2379,6 +2379,8 @@ dependencies = [
  "lofty",
  "rfd",
  "rodio",
+ "serde",
+ "serde_json",
  "smallvec",
 ]
 
