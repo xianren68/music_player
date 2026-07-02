@@ -50,6 +50,8 @@ struct MusicPlayer {
     bg_image: Option<Arc<RenderImage>>,
     /// 音乐文件夹路径
     music_folder_path: Option<SharedString>,
+    /// 均衡器动画相位（用于播放时三条竖条的高度跳动）
+    eq_phase: u32,
 }
 
 actions!(music_player, [ToggleSidebar, ToggleSettings, AddFolder, PlayPause, Next, Prev]);
@@ -127,7 +129,7 @@ impl MusicPlayer {
             bg_image_blur: saved.bg_blur,
             bg_image,
             music_folder_path: saved.music_folder.map(|s| s.into()),
-            total_time: 0.0,
+            eq_phase: 0,
         }
     }
 
@@ -353,6 +355,7 @@ impl MusicPlayer {
     }
 
     fn spawn_progress_updater(&mut self, cx: &mut Context<Self>) {
+        // 进度更新定时器（500ms）
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_spawn(async {
@@ -370,6 +373,22 @@ impl MusicPlayer {
                         }
                     }
                     cx.notify();
+                }).ok();
+            }
+        }).detach();
+
+        // 均衡器动画定时器（150ms 刷新一次，让竖条跳动）
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_spawn(async {
+                    std::thread::sleep(Duration::from_millis(150));
+                }).await;
+
+                this.update(cx, |this, cx| {
+                    if this.playing {
+                        this.eq_phase = this.eq_phase.wrapping_add(1);
+                        cx.notify();
+                    }
                 }).ok();
             }
         }).detach();
@@ -399,7 +418,7 @@ impl Render for MusicPlayer {
         let prog = if tot_t > 0.0 { cur_t / tot_t } else { 0.0 };
 
         // 构建各模块
-        let sidebar = ui::sidebar::build_sidebar(&self.folders, &self.current, &t, cx);
+        let sidebar = ui::sidebar::build_sidebar(&self.folders, &self.current, &t, self.eq_phase, cx);
         let topbar = ui::topbar::build_topbar(sidebar_open, settings_open, &t, cx);
         let center = ui::center::build_center(&title, &artist, &album, &t, cx);
         let player_bar = ui::player::build_player_bar(playing, prog, cur_t, tot_t, &t, cx);
@@ -432,22 +451,25 @@ impl Render for MusicPlayer {
         };
 
         // 内容区（不含 topbar）：侧边栏 + 主区域 + 设置面板
-        let body = div().id("body").flex_1().flex().flex_row();
+        let body = div().id("body").flex_1().flex().flex_row().overflow_hidden();
         let body = body
             .when(sidebar_open, |this| this.child(sidebar))
-            .child(div().id("main").flex_1().flex_col()
-                .child(player_bar)
-                .child(center))
+            // 主区域：center(封面+信息) + player_bar(进度条+控制) 整体垂直居中
+            .child(div().id("main").size_full()
+                .flex().flex_col().items_center().justify_center()
+                .child(center)
+                .child(player_bar))
             .when(settings_open, |this| this.child(settings_panel));
 
         // 内容层：垂直排列 topbar + body
+        // HTML 中 .app 用 --bg-surface (#12121a)，不是 --bg-base (#0a0a0f)
         let content = div().id("content").size_full().flex().flex_col();
         let content = if has_bg {
-            content.bg(Hsla { h: t.bg.h, s: t.bg.s, l: t.bg.l, a: 1.0 - bg_content_opacity })
+            content.bg(Hsla { h: t.surface.h, s: t.surface.s, l: t.surface.l, a: 1.0 - bg_content_opacity })
         } else if opacity_enabled {
-            content.bg(t.bg).opacity(opacity)
+            content.bg(t.surface).opacity(opacity)
         } else {
-            content.bg(t.bg)
+            content.bg(t.surface)
         };
         let content = content
             .child(topbar)

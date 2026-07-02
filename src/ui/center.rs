@@ -10,26 +10,27 @@ pub fn build_center(
     _cx: &mut Context<crate::MusicPlayer>,
 ) -> AnyElement {
     div().id("center")
-        .absolute().top(px(48.0)).bottom(px(140.0)).left(px(0.0)).right(px(0.0))
-        .flex().flex_col().items_center().justify_center()
+        .flex().flex_col().items_center()
+        // 参考截图：封面 + 歌曲信息 + 进度条 + 控制按钮 整体垂直居中
+        .justify_center()
+        // ── NOW PLAYING 标签 ──
         .child(
-            // ── NOW PLAYING 标签 ──
             div().flex().items_center().gap_2().mb_4()
                 .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(t.accent_light))
                 .child(div().text_xs().font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(t.accent_light)
-                    .child("正在播放"))
+                    .child("NOW PLAYING"))
         )
+        // ── 专辑封面 ──
         .child(
-            // ── 专辑封面 ──
             div().id("art").flex_none().w(px(240.0)).h(px(240.0)).rounded_2xl()
                 .bg(t.surface).flex().items_center().justify_center()
                 .shadow_2xl()
                 .child(div().text_size(px(64.0)).text_color(t.muted_fg).child("♪"))
         )
+        // ── 曲目信息 ──
         .child(
-            // ── 曲目信息 ──
-            div().flex_col().items_center().mt_6()
+            div().flex_col().items_center().mt_5()
                 .child(div().text_2xl().font_weight(gpui::FontWeight::BOLD)
                     .text_color(t.fg)
                     .child(title.to_string()))

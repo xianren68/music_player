@@ -28,7 +28,6 @@ pub fn build_settings(
     div().id("settings-panel").flex_none().w(px(300.0)).flex_col()
         .bg(Hsla { h: t.bg.h, s: t.bg.s, l: t.bg.l, a: 0.4 })
         .border_l_1().border_color(t.border)
-        // ── 标题栏 ──
         .child(
             div().px_5().pt_5().pb_2().flex().items_center().gap_2()
                 .child(svg().path("icons/settings.svg").size_5().text_color(t.accent_light))

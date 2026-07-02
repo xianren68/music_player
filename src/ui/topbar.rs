@@ -11,7 +11,8 @@ pub fn build_topbar(
 ) -> AnyElement {
     div().id("topbar").flex().flex_row().items_center().flex_none()
         .h(px(36.0)).px_4()
-        .bg(Hsla { h: t.bg.h, s: t.bg.s, l: t.bg.l, a: 0.8 })
+        // HTML: rgba(10, 10, 15, 0.6) + backdrop-blur
+        .bg(Hsla { h: t.bg.h, s: t.bg.s, l: t.bg.l, a: 0.6 })
         .border_b_1().border_color(t.border)
         // ── 左侧：应用名称 ──
         .child(div().flex().items_center().gap_2()
@@ -24,8 +25,6 @@ pub fn build_topbar(
             .child(
                 div().id("btn-toggle-lib").w(px(28.0)).h(px(28.0)).rounded_md()
                     .flex().items_center().justify_center()
-                    .text_color(if sidebar_open { t.accent_light } else { t.muted_fg })
-                    .when(sidebar_open, |this| this.bg(Hsla { h: t.accent.h, s: t.accent.s, l: t.accent.l, a: 0.18 }))
                     .cursor_pointer()
                     .hover(|style| style.bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.08 }))
                     .on_click(cx.listener(crate::MusicPlayer::toggle_sidebar))
@@ -36,8 +35,6 @@ pub fn build_topbar(
             .child(
                 div().id("btn-toggle-set").w(px(28.0)).h(px(28.0)).rounded_md()
                     .flex().items_center().justify_center()
-                    .text_color(if settings_open { t.accent_light } else { t.muted_fg })
-                    .when(settings_open, |this| this.bg(Hsla { h: t.accent.h, s: t.accent.s, l: t.accent.l, a: 0.18 }))
                     .cursor_pointer()
                     .hover(|style| style.bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.08 }))
                     .on_click(cx.listener(crate::MusicPlayer::toggle_settings))

@@ -8,8 +8,14 @@ pub fn build_sidebar(
     folders: &[Folder],
     current: &Option<(usize, usize)>,
     t: &ThemeConfig,
+    eq_phase: u32,
     cx: &mut Context<crate::MusicPlayer>,
 ) -> AnyElement {
+    // 用正弦波计算三条竖条高度，不同相位偏移模拟跳动效果
+    let phase = eq_phase as f32 * 0.6;
+    let bar_h1 = 4.0 + 8.0 * (phase + 0.0).sin().abs();       // 4~12px
+    let bar_h2 = 4.0 + 10.0 * (phase + 1.2).sin().abs();      // 4~14px
+    let bar_h3 = 4.0 + 8.0 * (phase + 2.4).sin().abs();       // 4~12px
     let mut folder_els: Vec<AnyElement> = Vec::new();
     for fi in 0..folders.len() {
         let name = folders[fi].name.clone();
@@ -25,12 +31,30 @@ pub fn build_sidebar(
                     div().id(("t", (fi * 10000 + ti) as u64))
                         .flex().items_center().gap_3()
                         .px_3().py_2().rounded_md()
-                        .hover(|style| style.bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.05 }))
+                        // 当前播放曲目高亮背景
+                        .when(cur, |this| this.bg(t.active))
+                        .hover(|style| style.bg(if cur { t.active } else { t.hover }))
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, e, w, cx| this.play_at(fi, ti, e, w, cx)))
-                        // 序号
-                        .child(div().flex_none().w(px(24.0)).text_xs().text_color(t.muted_fg)
-                            .text_center().child(format!("{}", ti + 1)))
+                        // 序号或播放动画条（参考 music-player.html 的 song-bars）
+                        .child(if cur {
+                            // 正在播放：三条均衡器竖条，用正弦波模拟跳动
+                            div().flex_none().w(px(20.0)).h(px(18.0))
+                                .flex().items_end().justify_center()
+                                .gap(px(2.0))
+                                .child(div().w(px(3.0)).h(px(bar_h1))
+                                    .rounded(px(1.0)).bg(t.accent_light))
+                                .child(div().w(px(3.0)).h(px(bar_h2))
+                                    .rounded(px(1.0)).bg(t.accent_light))
+                                .child(div().w(px(3.0)).h(px(bar_h3))
+                                    .rounded(px(1.0)).bg(t.accent_light))
+                                .into_any_element()
+                        } else {
+                            // 未播放：显示序号
+                            div().flex_none().w(px(24.0)).text_xs().text_color(t.muted_fg)
+                                .text_center().child(format!("{}", ti + 1))
+                                .into_any_element()
+                        })
                         // 封面占位
                         .child(div().flex_none().w(px(40.0)).h(px(40.0)).rounded_md()
                             .bg(t.surface).flex().items_center().justify_center()
