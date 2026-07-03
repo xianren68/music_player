@@ -2,6 +2,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+// 导入 Folder 类型用于缓存
+use crate::models::Folder;
+
 /// 可持久化的应用设置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -21,8 +24,11 @@ pub struct AppSettings {
     pub sidebar_open: bool,
     /// 设置面板是否打开
     pub settings_open: bool,
-    /// 音乐文件夹路径
-    pub music_folder: Option<String>,
+    /// 音乐文件夹路径列表（支持多个）
+    pub music_folders: Vec<String>,
+    /// 缓存的歌曲列表（避免每次启动都重新扫描）
+    #[serde(default)]
+    pub cached_folders: Vec<Folder>,
 }
 
 impl Default for AppSettings {
@@ -36,7 +42,8 @@ impl Default for AppSettings {
             theme_mode: "dark".into(),
             sidebar_open: true,
             settings_open: false,
-            music_folder: None,
+            music_folders: Vec::new(),
+            cached_folders: Vec::new(),
         }
     }
 }

@@ -4,6 +4,7 @@ mod audio;
 mod ui;
 mod theme;
 mod settings;
+mod lyrics;
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
@@ -48,10 +49,18 @@ struct MusicPlayer {
     bg_image_blur: bool,
     /// 背景图纹理
     bg_image: Option<Arc<RenderImage>>,
-    /// 音乐文件夹路径
-    music_folder_path: Option<SharedString>,
+    /// 音乐文件夹路径列表（支持多个）
+    music_folder_paths: Vec<SharedString>,
+    /// 正在加载的文件夹路径列表（用于显示 loading 状态）
+    loading_folders: Vec<SharedString>,
+    /// 当前播放曲目的专辑封面（渲染用）
+    current_cover: Option<Arc<RenderImage>>,
     /// 均衡器动画相位（用于播放时三条竖条的高度跳动）
     eq_phase: u32,
+    /// 当前歌词
+    lyrics: Option<lyrics::Lyrics>,
+    /// 当前歌词行索引
+    lyric_line: Option<usize>,
 }
 
 actions!(music_player, [ToggleSidebar, ToggleSettings, AddFolder, PlayPause, Next, Prev]);
@@ -109,7 +118,8 @@ impl MusicPlayer {
             })
         });
 
-        Self {
+        // 构建结构体
+        let mut this = Self {
             folders: Vec::new(),
             current: None,
             playing: false,
@@ -128,12 +138,88 @@ impl MusicPlayer {
             bg_image_path: saved.bg_image_path.map(|s| s.into()),
             bg_image_blur: saved.bg_blur,
             bg_image,
-            music_folder_path: saved.music_folder.map(|s| s.into()),
+            music_folder_paths: saved.music_folders.iter().map(|s| s.clone().into()).collect(),
+            loading_folders: Vec::new(),
+            current_cover: None,
             eq_phase: 0,
+            lyrics: None,
+            lyric_line: None,
+        };
+        // 自动加载已保存的音乐目录（需要在 cx 可用后调用）
+        this.load_music_folder(cx);
+        this
+    }
+
+    /// 根据保存的路径自动加载音乐目录（优先使用缓存）
+    fn load_music_folder(&mut self, cx: &mut Context<Self>) {
+        if self.music_folder_paths.is_empty() {
+            return;
+        }
+
+        // 优先从缓存加载（避免大目录每次都重新扫描）
+        let saved = AppSettings::load();
+        if !saved.cached_folders.is_empty() {
+            eprintln!("[缓存] 从 settings.json 加载了 {} 个文件夹, {} 首歌曲", 
+                saved.cached_folders.len(),
+                saved.cached_folders.iter().map(|f| f.tracks.len()).sum::<usize>());
+            self.folders = saved.cached_folders;
+            return;
+        }
+
+        // 缓存为空时才扫描（在后台线程进行，避免卡顿）
+        for path_str in &self.music_folder_paths {
+            let path_str_clone = path_str.clone();
+            let path_string = path_str_clone.to_string();
+            let dir = std::path::Path::new(path_str.as_ref());
+            if dir.is_dir() {
+                eprintln!("[扫描] 缓存为空，正在后台扫描目录: {}", path_str);
+                
+                // 添加 loading 状态
+                self.loading_folders.push(path_str.clone());
+                
+                // 在后台线程扫描
+                cx.spawn(async move |this, cx| {
+                    let path_string_clone = path_string.clone();
+                    let tracks = cx.background_spawn(async move {
+                        let dir = std::path::Path::new(&path_string_clone);
+                        crate::audio::scan_dir(dir)
+                    }).await;
+
+                    // 扫描完成后更新 UI
+                    this.update(cx, |this, cx| {
+                        let dir = std::path::Path::new(&path_string);
+                        let name = dir.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("音乐")
+                            .to_string();
+                        
+                        if !tracks.is_empty() {
+                            this.folders.push(Folder { name, expanded: true, tracks });
+                        }
+                        
+                        // 移除 loading 状态
+                        this.loading_folders.retain(|p| p != &path_str_clone);
+                        
+                        // 保存缓存
+                        this.save_settings_for_cache();
+                        cx.notify();
+                    }).ok();
+                }).detach();
+            }
         }
     }
 
-    /// 保存当前设置到文件
+
+    /// 保存歌曲列表缓存
+    fn save_settings_for_cache(&self) {
+        let mut saved = AppSettings::load();
+        saved.cached_folders = self.folders.clone();
+        saved.music_folders = self.music_folder_paths.iter().map(|s| s.to_string()).collect();
+        saved.save();
+        eprintln!("[缓存] 已保存 {} 个文件夹到缓存", saved.cached_folders.len());
+    }
+
+    /// 保存当前设置到文件（包含歌曲列表缓存）
     fn save_settings(&self, cx: &Context<Self>) {
         let settings = AppSettings {
             opacity_enabled: self.opacity_enabled,
@@ -147,7 +233,8 @@ impl MusicPlayer {
             },
             sidebar_open: self.sidebar_open,
             settings_open: self.settings_open,
-            music_folder: self.music_folder_path.as_ref().map(|s| s.to_string()),
+            music_folders: self.music_folder_paths.iter().map(|s| s.to_string()).collect(),
+            cached_folders: self.folders.clone(),  // 同步缓存
         };
         settings.save();
     }
@@ -273,23 +360,157 @@ impl MusicPlayer {
         cx.notify();
     }
 
-    /// 选择音乐文件夹
+    /// 选择音乐文件夹（在后台线程运行，避免阻塞主线程导致 RefCell panic）
     fn pick_music_folder(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        if let Some(dir) = rfd::FileDialog::new().set_title("选择音乐文件夹").pick_folder() {
-            let path_str: SharedString = dir.to_string_lossy().into_owned().into();
-            self.music_folder_path = Some(path_str.clone());
-            // 扫描文件夹中的音频
-            let tracks = audio::scan_dir(&dir);
-            if !tracks.is_empty() {
+        eprintln!("[文件夹] 点击了添加音乐文件夹按钮");
+        let weak_entity = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            eprintln!("[文件夹] 正在打开文件选择对话框...");
+            
+            // 在独立线程中运行阻塞的文件对话框
+            // rfd 在 Windows 上需要 COM 初始化，独立线程更可靠
+            let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
+            std::thread::spawn(move || {
+                eprintln!("[文件夹] 后台线程：正在显示对话框");
+                let result = rfd::FileDialog::new()
+                    .set_title("选择音乐文件夹")
+                    .pick_folder();
+                eprintln!("[文件夹] 后台线程：选择结果 = {:?}", result);
+                let _ = tx.send(result);
+            });
+
+            // 在后台等待结果
+            let result = cx.background_spawn(async move {
+                rx.recv().ok().flatten()
+            }).await;
+
+            eprintln!("[文件夹] 收到结果: {:?}", result);
+            
+            if let Some(dir) = result {
+                let path_str: SharedString = dir.to_string_lossy().into_owned().into();
+                
+                // 检查是否已添加
+                let already_exists = if let Some(entity) = weak_entity.upgrade() {
+                    entity.read_with(cx, |this, _| {
+                        this.music_folder_paths.contains(&path_str)
+                    }).unwrap_or(false)
+                } else {
+                    false
+                };
+
+                if !already_exists {
+                    // 添加 loading 状态
+                    if let Some(entity) = weak_entity.upgrade() {
+                        entity.update(cx, |this, cx| {
+                            this.music_folder_paths.push(path_str.clone());
+                            this.loading_folders.push(path_str.clone());
+                            cx.notify();
+                        }).ok();
+                    }
+
+                    eprintln!("[文件夹] 开始扫描文件夹: {}", path_str);
+                    
+                    // 在后台线程扫描文件夹
+                    let path_string = path_str.to_string();
+                    let path_str_clone = path_str.clone();
+                    let weak_entity_clone = weak_entity.clone();
+                    
+                    cx.spawn(async move |cx| {
+                        // 在后台线程执行扫描
+                        let path_string_clone = path_string.clone();
+                        let tracks = cx.background_spawn(async move {
+                            let dir = std::path::Path::new(&path_string_clone);
+                            crate::audio::scan_dir(dir)
+                        }).await;
+
+                        // 扫描完成后更新 UI
+                        if let Some(entity) = weak_entity_clone.upgrade() {
+                            entity.update(cx, |this, cx| {
+                                let dir = std::path::Path::new(&path_string);
+                                let name = dir.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("音乐")
+                                    .to_string();
+                                
+                                if !tracks.is_empty() {
+                                    this.folders.push(crate::models::Folder { 
+                                        name: name.clone(), 
+                                        expanded: true, 
+                                        tracks 
+                                    });
+                                }
+                                
+                                // 移除 loading 状态
+                                this.loading_folders.retain(|p| p != &path_str_clone);
+                                
+                                // 保存缓存
+                                this.save_settings_for_cache();
+                                this.save_settings(cx);
+                                cx.notify();
+                            }).ok();
+                        }
+                    }).detach();
+                    
+                    eprintln!("[文件夹] 文件夹扫描已启动");
+                } else {
+                    eprintln!("[文件夹] 文件夹已存在，跳过");
+                }
+            }
+        }).detach();
+    }
+
+    /// 删除音乐文件夹
+    fn remove_music_folder(&mut self, path: SharedString, cx: &mut Context<Self>) {
+        self.music_folder_paths.retain(|p| p != &path);
+        // 同时删除对应的文件夹
+        let path_obj = std::path::Path::new(path.as_ref());
+        let folder_name = path_obj.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        self.folders.retain(|f| f.name != folder_name);
+        
+        self.save_settings_for_cache();
+        self.save_settings(cx);
+        cx.notify();
+    }
+
+    /// 刷新音乐文件夹（在后台线程扫描）
+    fn refresh_music_folder(&mut self, path: SharedString, cx: &mut Context<Self>) {
+        // 添加 loading 状态
+        self.loading_folders.push(path.clone());
+        cx.notify();
+        
+        let path_clone = path.clone();
+        let path_string = path_clone.to_string();
+        cx.spawn(async move |this, cx| {
+            // 在后台线程扫描
+            let path_string_clone = path_string.clone();
+            let tracks = cx.background_spawn(async move {
+                let dir = std::path::Path::new(&path_string_clone);
+                crate::audio::scan_dir(dir)
+            }).await;
+
+            // 扫描完成后更新 UI
+            this.update(cx, |this, cx| {
+                let dir = std::path::Path::new(&path_string);
                 let name = dir.file_name()
                     .and_then(|n| n.to_str())
-                    .unwrap_or("?")
+                    .unwrap_or("音乐")
                     .to_string();
-                self.folders.push(Folder { name, expanded: true, tracks });
-            }
-            self.save_settings(cx);
-            cx.notify();
-        }
+                
+                // 更新文件夹
+                if let Some(folder) = this.folders.iter_mut().find(|f| f.name == name) {
+                    folder.tracks = tracks;
+                }
+                
+                // 移除 loading 状态
+                this.loading_folders.retain(|p| p != &path_clone);
+                
+                // 保存缓存
+                this.save_settings_for_cache();
+                cx.notify();
+            }).ok();
+        }).detach();
     }
 
     // ── 播放控制 ──
@@ -326,15 +547,65 @@ impl MusicPlayer {
 
     fn play(&mut self, fi: usize, ti: usize, cx: &mut Context<Self>) {
         self.player.stop();
-        if let Some(f) = self.folders.get(fi) {
-            if let Some(t) = f.tracks.get(ti) {
-                self.player.play(t);
-                self.current = Some((fi, ti));
-                self.playing = true;
-                self.play_offset = 0.0;
-                self.play_start = Some(Instant::now());
-                self.spawn_progress_updater(cx);
+        
+        // 获取 track 的信息（先克隆需要的值，避免借用问题）
+        let (track_path, track_title) = if let Some(track) = self.folders.get(fi).and_then(|f| f.tracks.get(ti)) {
+            (track.path.clone(), track.title.clone())
+        } else {
+            return;
+        };
+        
+        // 播放 track
+        let track_ref = &self.folders[fi].tracks[ti];
+        self.player.play(track_ref);
+        
+        // 提取专辑封面（如果还没有）
+        if self.folders[fi].tracks[ti].cover.is_none() {
+            if let Some(cover_data) = crate::audio::extract_cover(&self.folders[fi].tracks[ti].path) {
+                self.folders[fi].tracks[ti].cover = Some(std::sync::Arc::new(cover_data));
             }
+        }
+        
+        // 转换封面为 RenderImage（用于显示）
+        self.current_cover = self.folders[fi].tracks[ti].cover.as_ref()
+            .and_then(|cover_data| {
+                // 解码图片
+                if let Ok(img) = image::load_from_memory(cover_data) {
+                    let rgba = img.to_rgba8();
+                    let frame = image::Frame::new(rgba);
+                    Some(Arc::new(RenderImage::new(
+                        smallvec::SmallVec::from_elem(frame, 1)
+                    )))
+                } else {
+                    None
+                }
+            });
+        
+        // 检查是否是同一首歌（避免重复加载歌词导致闪烁）
+        let is_same_track = self.current == Some((fi, ti));
+        
+        self.current = Some((fi, ti));
+        self.playing = true;
+        self.play_offset = 0.0;
+        self.play_start = Some(Instant::now());
+
+        // 只有切换到不同歌曲时才加载歌词和重置位置
+        if !is_same_track {
+            self.load_lyrics(&track_path, &track_title);
+            self.lyric_line = None; // 切换歌曲才重置歌词行
+        }
+        // 同一首歌：保持当前 lyric_line 不变，避免闪烁
+        
+        self.spawn_progress_updater(cx);
+    }
+    
+    /// 加载歌词
+    fn load_lyrics(&mut self, track_path: &std::path::Path, title: &str) {
+        // 查找歌词文件
+        if let Some(lyrics) = lyrics::find_lyrics(track_path, title) {
+            self.lyrics = Some(lyrics);
+        } else {
+            self.lyrics = None;
         }
     }
 
@@ -366,6 +637,21 @@ impl MusicPlayer {
                     if this.playing {
                         let progress = this.current_progress();
                         let total = this.total_time();
+                        
+                        // 更新歌词行索引
+                        // 注意：find_line 返回 None 时不要重置 lyric_line，
+                        // 否则会导致 UI 闪烁（在两句歌词之间或还没开始唱时）
+                        if let Some(ref lyrics) = this.lyrics {
+                            let progress_ms = (progress * 1000.0) as u32;
+                            if let Some(new_line) = lyrics.find_line(progress_ms) {
+                                if this.lyric_line != Some(new_line) {
+                                    this.lyric_line = Some(new_line);
+                                }
+                            }
+                            // find_line 返回 None 时保持 lyric_line 不变
+                            // （在两句之间时不切换，还没开始唱时保持 None）
+                        }
+                        
                         if total > 0.0 && progress >= total {
                             this.playing = false;
                             this.play_offset = 0.0;
@@ -416,11 +702,17 @@ impl Render for MusicPlayer {
         let cur_t = self.current_progress();
         let tot_t = self.total_time();
         let prog = if tot_t > 0.0 { cur_t / tot_t } else { 0.0 };
+        let position_ms = (cur_t * 1000.0) as u32;
 
         // 构建各模块
-        let sidebar = ui::sidebar::build_sidebar(&self.folders, &self.current, &t, self.eq_phase, cx);
+        let sidebar = ui::sidebar::build_sidebar(&self.folders, &self.loading_folders, &self.current, &t, self.eq_phase, cx);
         let topbar = ui::topbar::build_topbar(sidebar_open, settings_open, &t, cx);
-        let center = ui::center::build_center(&title, &artist, &album, &t, cx);
+        
+        // 歌词数据（传递给 center）
+        let lyrics_data = self.lyrics.as_ref();
+        let lyric_line_idx = self.lyric_line;
+        
+        let center = ui::center::build_center(&title, &artist, &album, &t, cx, lyrics_data, lyric_line_idx, position_ms, self.current_cover.as_ref());
         let player_bar = ui::player::build_player_bar(playing, prog, cur_t, tot_t, &t, cx);
         let settings_panel = ui::settings::build_settings(
             opacity, opacity_enabled, &self.slider,

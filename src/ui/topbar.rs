@@ -1,6 +1,5 @@
 // ─── 顶部标题栏模块 ───
 use gpui::*;
-use gpui::prelude::FluentBuilder;
 use crate::theme::ThemeConfig;
 
 pub fn build_topbar(
@@ -14,12 +13,19 @@ pub fn build_topbar(
         // HTML: rgba(10, 10, 15, 0.6) + backdrop-blur
         .bg(Hsla { h: t.bg.h, s: t.bg.s, l: t.bg.l, a: 0.6 })
         .border_b_1().border_color(t.border)
-        // ── 左侧：应用名称 ──
-        .child(div().flex().items_center().gap_2()
-            .child(svg().path("icons/music.svg").size_4().text_color(t.accent_light))
-            .child(div().text_xs().text_color(t.muted).child("Sonic — Music Player")))
-        .child(div().flex_1())
-        // ── 右侧：控制按钮 ──
+        // ── 左侧：应用名称（可拖动窗口）──
+        .child(
+            div().id("topbar-title").flex().items_center().gap_2()
+                .window_control_area(WindowControlArea::Drag)
+                .child(svg().path("icons/music.svg").size_4().text_color(t.accent_light))
+                .child(div().text_xs().text_color(t.muted).child("Sonic — Music Player"))
+        )
+        // ── 中间：空白区域（可拖动窗口）──
+        .child(
+            div().id("topbar-spacer").flex_1()
+                .window_control_area(WindowControlArea::Drag)
+        )
+        // ── 右侧：控制按钮（不可拖动，需要可点击）──
         .child(div().flex().items_center().gap_3()
             // 切换音乐库
             .child(

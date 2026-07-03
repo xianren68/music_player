@@ -3,8 +3,8 @@ use gpui::*;
 use crate::theme::ThemeConfig;
 
 pub fn build_player_bar(
-    _playing: bool,
-    progress: f64,
+    playing: bool,
+    _progress: f64,
     cur_t: f64,
     tot_t: f64,
     t: &ThemeConfig,
@@ -74,7 +74,7 @@ pub fn build_player_bar(
                         .hover(|style| style.opacity(0.9))
                         .active(|s| s.opacity(0.8))
                         .on_click(cx.listener(crate::MusicPlayer::play_pause))
-                        .child(svg().path(if _playing {
+                        .child(svg().path(if playing {
                             "icons/pause.svg"
                         } else {
                             "icons/play.svg"

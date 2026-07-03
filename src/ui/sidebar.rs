@@ -1,26 +1,31 @@
 // ─── 侧边栏模块 ───
 use gpui::*;
 use gpui::prelude::FluentBuilder;
+use gpui_component::scroll::ScrollableElement;
 use crate::theme::ThemeConfig;
 use crate::models::Folder;
 
 pub fn build_sidebar(
     folders: &[Folder],
+    loading_folders: &[SharedString],
     current: &Option<(usize, usize)>,
     t: &ThemeConfig,
     eq_phase: u32,
     cx: &mut Context<crate::MusicPlayer>,
 ) -> AnyElement {
-    // 用正弦波计算三条竖条高度，不同相位偏移模拟跳动效果
+    // 用正弦波计算三条竖条高度
     let phase = eq_phase as f32 * 0.6;
-    let bar_h1 = 4.0 + 8.0 * (phase + 0.0).sin().abs();       // 4~12px
-    let bar_h2 = 4.0 + 10.0 * (phase + 1.2).sin().abs();      // 4~14px
-    let bar_h3 = 4.0 + 8.0 * (phase + 2.4).sin().abs();       // 4~12px
+    let bar_h1 = 4.0 + 8.0 * (phase + 0.0).sin().abs();
+    let bar_h2 = 4.0 + 10.0 * (phase + 1.2).sin().abs();
+    let bar_h3 = 4.0 + 8.0 * (phase + 2.4).sin().abs();
+
     let mut folder_els: Vec<AnyElement> = Vec::new();
     for fi in 0..folders.len() {
         let name = folders[fi].name.clone();
         let exp = folders[fi].expanded;
         let cnt = folders[fi].tracks.len();
+        let fidx = fi;
+
         let mut track_els: Vec<AnyElement> = Vec::new();
         if exp {
             for ti in 0..cnt {
@@ -31,14 +36,11 @@ pub fn build_sidebar(
                     div().id(("t", (fi * 10000 + ti) as u64))
                         .flex().items_center().gap_3()
                         .px_3().py_2().rounded_md()
-                        // 当前播放曲目高亮背景
                         .when(cur, |this| this.bg(t.active))
                         .hover(|style| style.bg(if cur { t.active } else { t.hover }))
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, e, w, cx| this.play_at(fi, ti, e, w, cx)))
-                        // 序号或播放动画条（参考 music-player.html 的 song-bars）
                         .child(if cur {
-                            // 正在播放：三条均衡器竖条，用正弦波模拟跳动
                             div().flex_none().w(px(20.0)).h(px(18.0))
                                 .flex().items_end().justify_center()
                                 .gap(px(2.0))
@@ -50,7 +52,6 @@ pub fn build_sidebar(
                                     .rounded(px(1.0)).bg(t.accent_light))
                                 .into_any_element()
                         } else {
-                            // 未播放：显示序号
                             div().flex_none().w(px(24.0)).text_xs().text_color(t.muted_fg)
                                 .text_center().child(format!("{}", ti + 1))
                                 .into_any_element()
@@ -63,7 +64,7 @@ pub fn build_sidebar(
                         .child(div().flex_1().flex_col().overflow_hidden()
                             .child(div().text_sm().text_ellipsis().whitespace_nowrap()
                                 .text_color(if cur { t.accent_light } else { t.fg })
-                                .child(track.title))
+                                .child(track.title.clone()))
                             .child(div().text_xs().text_ellipsis().whitespace_nowrap()
                                 .text_color(t.muted_fg).child(track.artist)))
                         // 时长
@@ -72,7 +73,7 @@ pub fn build_sidebar(
                 );
             }
         }
-        let fidx = fi;
+
         folder_els.push(
             div().id(("f", fidx as u64)).flex_col()
                 .child(
@@ -95,7 +96,7 @@ pub fn build_sidebar(
     let search_bar = div().flex().items_center().gap_2()
         .px_3().py_2().rounded_lg().mt_3()
         .bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.05 })
-        .border_1().border_color(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.06 })
+        .border_1().border_color(t.border)
         .child(svg().path("icons/search.svg").size_4().text_color(t.muted_fg))
         .child(div().text_sm().text_color(t.muted_fg).child("搜索歌曲、歌手..."));
 
@@ -115,6 +116,28 @@ pub fn build_sidebar(
                 .text_color(t.muted_fg).child("专辑")
         );
 
+    // loading 文件夹列表
+    let mut loading_els: Vec<AnyElement> = Vec::new();
+    for (idx, path_str) in loading_folders.iter().enumerate() {
+        let dir = std::path::Path::new(path_str.as_ref());
+        let name = dir.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("音乐")
+            .to_string();
+
+        loading_els.push(
+            div().id(("loading", idx as u64)).flex_col()
+                .child(
+                    div().flex().items_center().justify_between()
+                        .px_3().py_2().rounded_md()
+                        .child(div().flex().items_center().gap_2()
+                            .child(div().text_color(t.accent_light).text_xs().child("⏳"))
+                            .child(div().text_color(t.fg).text_sm().font_weight(gpui::FontWeight::MEDIUM).child(name.clone())))
+                        .child(div().text_color(t.muted_fg).text_xs().child("加载中...")))
+                .into_any()
+        );
+    }
+
     div().id("sidebar").flex_none().w(px(280.0)).flex_col()
         .bg(Hsla { h: t.bg.h, s: t.bg.s, l: t.bg.l, a: 0.5 })
         .border_r_1().border_color(t.border)
@@ -128,13 +151,15 @@ pub fn build_sidebar(
         )
         // 标签页
         .child(div().px_3().pb_2().child(tabs))
-        // 歌曲列表
-        .child(div().id("sidebar-list").flex_1().flex_col().overflow_hidden()
+        // 歌曲列表（带滚动）
+        .child(div().id("sidebar-list").flex_1().min_h_0()
             .px_3().pb_3()
+            .overflow_y_scrollbar()
             .child(div().flex_col().gap_0p5()
-                .when(!has_folders, |this| this.child(
+                .when(!has_folders && loading_els.is_empty(), |this| this.child(
                     div().text_color(t.muted_fg).text_center().py_12().text_sm()
                         .child("在设置中添加音乐文件夹")))
-                .children(folder_els)))
+                .children(folder_els)
+                .children(loading_els)))
         .into_any()
 }

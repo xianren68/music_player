@@ -19,7 +19,38 @@ pub fn read_meta(path: &Path) -> Option<Track> {
         .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or("未知").into());
     let artist = tag.and_then(|t| t.get_string(&ItemKey::TrackArtist)).map(|s| s.into()).unwrap_or_default();
     let album = tag.and_then(|t| t.get_string(&ItemKey::AlbumTitle)).map(|s| s.into()).unwrap_or_default();
-    Some(Track { path: path.into(), title, artist, album, duration: dur })
+    
+    Some(Track { 
+        path: path.into(), 
+        title, 
+        artist, 
+        album, 
+        duration: dur,
+        cover: None,
+    })
+}
+
+/// 从音频文件提取专辑封面
+pub fn extract_cover(path: &Path) -> Option<Vec<u8>> {
+    let f = Probe::open(path).ok()?.guess_file_type().ok()?.read().ok()?;
+    let tag = f.first_tag()?;
+    
+    // 获取所有图片，优先使用封面
+    let pictures = tag.pictures();
+    if pictures.is_empty() {
+        None
+    } else {
+        // 尝试找到封面图片
+        for pic in pictures {
+            // 检查是否为封面（Front Cover）
+            if format!("{:?}", pic.pic_type()).contains("Cover") || 
+               format!("{:?}", pic.pic_type()).contains("Front") {
+                return Some(pic.data().to_vec());
+            }
+        }
+        // 如果没有封面，返回第一张图片
+        pictures.first().map(|p| p.data().to_vec())
+    }
 }
 
 /// 扫描文件夹，提取所有音频文件

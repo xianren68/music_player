@@ -1,0 +1,7 @@
+Original header: 78ee997f403f66b4
+Fixed header: 789c997f403f66b4
+
+Trying decompress with fixed header...
+FAILED: Error -3 while decompressing data: invalid stored block lengths
+
+All FLG values failed

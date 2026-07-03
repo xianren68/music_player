@@ -1,0 +1,13 @@
+File size: 2610 bytes
+Header (hex): 78ee997f403f66b4
+Detected zlib header: 0x78 0xee
+CMF: 0x78 FLG: 0xee
+FCHECK: 14
+WARNING: FDICT=1, preset dictionary present
+Dictionary ID: 0x997f403f
+
+Trying zlib.decompress...
+FAILED: Error -3 while decompressing data: incorrect header check
+
+Trying raw deflate (skip 2 bytes)...
+FAILED: Error -3 while decompressing data: invalid stored block lengths

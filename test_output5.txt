@@ -1,0 +1,15 @@
+Encrypted data size: 2610
+Encrypted header: 38dba42f155d2280
+Key: b'@5=PUbD49IY7nH'
+
+Method 1: XOR decryption
+Decrypted header: 78ee997f403f66b4
+
+Method 2: RC4 decryption
+Decrypted header: bb0d12f8d643de59
+
+Trying to decompress XOR decrypted data...
+All wbits values failed
+
+Trying to decompress RC4 decrypted data...
+All wbits values failed

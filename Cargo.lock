@@ -2373,10 +2373,12 @@ name = "gpui_demo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "flate2",
  "gpui",
  "gpui-component",
  "image",
  "lofty",
+ "miniz_oxide",
  "rfd",
  "rodio",
  "serde",
