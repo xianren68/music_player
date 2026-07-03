@@ -1,97 +1,63 @@
 // ─── 侧边栏模块 ───
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use gpui_component::scroll::ScrollableElement;
+use gpui_component::tooltip::Tooltip;
 use crate::theme::ThemeConfig;
 use crate::models::Folder;
+
+/// 列表项的引用（用于在 uniform_list 闭包内渲染）
+enum ListItemRef<'a> {
+    FolderHeader { fi: usize, name: &'a str, count: usize, expanded: bool },
+    Track { fi: usize, ti: usize, track: &'a crate::models::Track },
+    Loading { name: &'a str },
+}
+
+/// 根据 ix 在 folders + loading_folders 中查找对应的列表项
+fn find_list_item<'a>(
+    folders: &'a [Folder],
+    loading_folders: &'a [SharedString],
+    ix: usize,
+) -> Option<ListItemRef<'a>> {
+    let mut idx = 0;
+    for (fi, folder) in folders.iter().enumerate() {
+        if idx == ix {
+            return Some(ListItemRef::FolderHeader {
+                fi,
+                name: &folder.name,
+                count: folder.tracks.len(),
+                expanded: folder.expanded,
+            });
+        }
+        idx += 1;
+        if folder.expanded {
+            let len = folder.tracks.len();
+            if ix < idx + len {
+                let ti = ix - idx;
+                return Some(ListItemRef::Track { fi, ti, track: &folder.tracks[ti] });
+            }
+            idx += len;
+        }
+    }
+    let loading_idx = ix.saturating_sub(idx);
+    if loading_idx < loading_folders.len() {
+        let path_str = &loading_folders[loading_idx];
+        let dir = std::path::Path::new(path_str.as_ref());
+        let name = dir.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("音乐");
+        Some(ListItemRef::Loading { name })
+    } else {
+        None
+    }
+}
 
 pub fn build_sidebar(
     folders: &[Folder],
     loading_folders: &[SharedString],
-    current: &Option<(usize, usize)>,
     t: &ThemeConfig,
-    eq_phase: u32,
+    list_height: gpui::Pixels,
     cx: &mut Context<crate::MusicPlayer>,
 ) -> AnyElement {
-    // 用正弦波计算三条竖条高度
-    let phase = eq_phase as f32 * 0.6;
-    let bar_h1 = 4.0 + 8.0 * (phase + 0.0).sin().abs();
-    let bar_h2 = 4.0 + 10.0 * (phase + 1.2).sin().abs();
-    let bar_h3 = 4.0 + 8.0 * (phase + 2.4).sin().abs();
-
-    let mut folder_els: Vec<AnyElement> = Vec::new();
-    for fi in 0..folders.len() {
-        let name = folders[fi].name.clone();
-        let exp = folders[fi].expanded;
-        let cnt = folders[fi].tracks.len();
-        let fidx = fi;
-
-        let mut track_els: Vec<AnyElement> = Vec::new();
-        if exp {
-            for ti in 0..cnt {
-                let track = folders[fi].tracks[ti].clone();
-                let cur = *current == Some((fi, ti));
-                let dur = crate::audio::fmt_time(track.duration);
-                track_els.push(
-                    div().id(("t", (fi * 10000 + ti) as u64))
-                        .flex().items_center().gap_3()
-                        .px_3().py_2().rounded_md()
-                        .when(cur, |this| this.bg(t.active))
-                        .hover(|style| style.bg(if cur { t.active } else { t.hover }))
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, e, w, cx| this.play_at(fi, ti, e, w, cx)))
-                        .child(if cur {
-                            div().flex_none().w(px(20.0)).h(px(18.0))
-                                .flex().items_end().justify_center()
-                                .gap(px(2.0))
-                                .child(div().w(px(3.0)).h(px(bar_h1))
-                                    .rounded(px(1.0)).bg(t.accent_light))
-                                .child(div().w(px(3.0)).h(px(bar_h2))
-                                    .rounded(px(1.0)).bg(t.accent_light))
-                                .child(div().w(px(3.0)).h(px(bar_h3))
-                                    .rounded(px(1.0)).bg(t.accent_light))
-                                .into_any_element()
-                        } else {
-                            div().flex_none().w(px(24.0)).text_xs().text_color(t.muted_fg)
-                                .text_center().child(format!("{}", ti + 1))
-                                .into_any_element()
-                        })
-                        // 封面占位
-                        .child(div().flex_none().w(px(40.0)).h(px(40.0)).rounded_md()
-                            .bg(t.surface).flex().items_center().justify_center()
-                            .text_xs().text_color(t.muted_fg).child("♪"))
-                        // 歌曲信息
-                        .child(div().flex_1().flex_col().overflow_hidden()
-                            .child(div().text_sm().text_ellipsis().whitespace_nowrap()
-                                .text_color(if cur { t.accent_light } else { t.fg })
-                                .child(track.title.clone()))
-                            .child(div().text_xs().text_ellipsis().whitespace_nowrap()
-                                .text_color(t.muted_fg).child(track.artist)))
-                        // 时长
-                        .child(div().flex_none().text_xs().text_color(t.muted_fg).child(dur))
-                        .into_any()
-                );
-            }
-        }
-
-        folder_els.push(
-            div().id(("f", fidx as u64)).flex_col()
-                .child(
-                    div().id(("fh", fidx as u64)).flex().items_center().justify_between()
-                        .px_3().py_2().rounded_md()
-                        .hover(|style| style.bg(t.hover))
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, e, w, cx| this.toggle_folder(fidx, e, w, cx)))
-                        .child(div().flex().items_center().gap_2()
-                            .child(div().text_color(t.accent_light).text_xs().child(if exp { "▼" } else { "▶" }))
-                            .child(div().text_color(t.fg).text_sm().font_weight(gpui::FontWeight::MEDIUM).child(name)))
-                        .child(div().text_color(t.muted_fg).text_xs().child(format!("{}", cnt))))
-                .when(exp, |this| this.child(div().flex_col().ml_2().gap_0p5().my_1().children(track_els)))
-                .into_any()
-        );
-    }
-    let has_folders = !folders.is_empty();
-
     // 搜索栏
     let search_bar = div().flex().items_center().gap_2()
         .px_3().py_2().rounded_lg().mt_3()
@@ -116,29 +82,58 @@ pub fn build_sidebar(
                 .text_color(t.muted_fg).child("专辑")
         );
 
-    // loading 文件夹列表
-    let mut loading_els: Vec<AnyElement> = Vec::new();
-    for (idx, path_str) in loading_folders.iter().enumerate() {
-        let dir = std::path::Path::new(path_str.as_ref());
-        let name = dir.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("音乐")
-            .to_string();
+    // 计算总列表项数
+    let total: usize = {
+        let mut count = 0;
+        for folder in folders {
+            count += 1;
+            if folder.expanded {
+                count += folder.tracks.len();
+            }
+        }
+        count += loading_folders.len();
+        count
+    };
 
-        loading_els.push(
-            div().id(("loading", idx as u64)).flex_col()
-                .child(
-                    div().flex().items_center().justify_between()
-                        .px_3().py_2().rounded_md()
-                        .child(div().flex().items_center().gap_2()
-                            .child(div().text_color(t.accent_light).text_xs().child("⏳"))
-                            .child(div().text_color(t.fg).text_sm().font_weight(gpui::FontWeight::MEDIUM).child(name.clone())))
-                        .child(div().text_color(t.muted_fg).text_xs().child("加载中...")))
-                .into_any()
-        );
-    }
+    let has_folders = !folders.is_empty();
+    let has_loading = !loading_folders.is_empty();
+    let is_empty = !has_folders && !has_loading;
 
-    div().id("sidebar").flex_none().w(px(280.0)).flex_col()
+    // ── 虚拟滚动列表 ──
+    let list = if is_empty {
+        div().text_color(t.muted_fg).text_center().py_12().text_sm()
+            .child("在设置中添加音乐文件夹")
+            .into_any()
+    } else {
+        let t_clone = t.clone();
+
+        uniform_list(
+            "sidebar-virtual-list",
+            total,
+            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                let phase = this.eq_phase as f32 * 0.6;
+                let bar_h1 = 4.0 + 8.0 * (phase + 0.0).sin().abs();
+                let bar_h2 = 4.0 + 10.0 * (phase + 1.2).sin().abs();
+                let bar_h3 = 4.0 + 8.0 * (phase + 2.4).sin().abs();
+
+                let mut items: Vec<AnyElement> = Vec::with_capacity(range.end - range.start);
+                for ix in range {
+                    let item = find_list_item(&this.folders, &this.loading_folders, ix);
+                    if let Some(item) = item {
+                        items.push(render_list_item(
+                            item, ix, this.current, &t_clone,
+                            bar_h1, bar_h2, bar_h3, cx,
+                        ));
+                    }
+                }
+                items
+            }),
+        )
+        .h(list_height)
+        .into_any()
+    };
+
+    div().id("sidebar").flex_none().w(px(280.0)).h_full().flex_col()
         .bg(Hsla { h: t.bg.h, s: t.bg.s, l: t.bg.l, a: 0.5 })
         .border_r_1().border_color(t.border)
         // 标题栏
@@ -151,15 +146,141 @@ pub fn build_sidebar(
         )
         // 标签页
         .child(div().px_3().pb_2().child(tabs))
-        // 歌曲列表（带滚动）
-        .child(div().id("sidebar-list").flex_1().min_h_0()
+        // 歌曲列表（虚拟滚动）— 和旧版一样：容器有 px_3 pb_3
+        .child(div().id("sidebar-list").flex_1().min_h_0().overflow_hidden()
             .px_3().pb_3()
-            .overflow_y_scrollbar()
-            .child(div().flex_col().gap_0p5()
-                .when(!has_folders && loading_els.is_empty(), |this| this.child(
-                    div().text_color(t.muted_fg).text_center().py_12().text_sm()
-                        .child("在设置中添加音乐文件夹")))
-                .children(folder_els)
-                .children(loading_els)))
+            .child(list))
         .into_any()
+}
+
+/// 渲染单个列表项（完全按照旧版样式）
+fn render_list_item(
+    item: ListItemRef,
+    ix: usize,
+    current: Option<(usize, usize)>,
+    t: &ThemeConfig,
+    bar_h1: f32,
+    bar_h2: f32,
+    bar_h3: f32,
+    cx: &mut Context<crate::MusicPlayer>,
+) -> AnyElement {
+    match item {
+        ListItemRef::FolderHeader { fi, name, count, expanded } => {
+            let fidx = fi;
+            div().id(("fh", ix as u64))
+                .w_full()
+                .h(px(56.0))  // 统一高度：和歌曲项一样
+                .flex().items_center().justify_between()
+                .px_3().rounded_md()
+                .hover(|style| style.bg(t.hover))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, e, w, cx| this.toggle_folder(fidx, e, w, cx)))
+                .child(div().flex().items_center().gap_2()
+                    .child(div().text_color(t.accent_light).text_xs()
+                        .child(if expanded { "▼" } else { "▶" }))
+                    .child(div().text_color(t.fg).text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(name.to_string())))
+                .child(div().text_color(t.muted_fg).text_xs()
+                    .child(format!("{}", count)))
+                .into_any_element()
+        }
+        ListItemRef::Track { fi, ti, track } => {
+            let cur = current == Some((fi, ti));
+            let dur = crate::audio::fmt_time(track.duration);
+            let title_str = track.title.clone();
+            let artist_str = track.artist.clone();
+
+            div().id(("t", ix as u64))
+                .w_full()
+                .h(px(56.0))
+                .flex().items_center().gap_3()
+                .ml_2().px_3().rounded_md()
+                .when(cur, |this| this.bg(t.active))
+                .hover(|style| style.bg(if cur { t.active } else { t.hover }))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, e, w, cx| this.play_at(fi, ti, e, w, cx)))
+                // tooltip 显示完整歌名（只在作者非空时显示 "歌名 - 作者"）
+                .tooltip(move |_window, cx| {
+                    let text = if artist_str.is_empty() {
+                        title_str.clone()
+                    } else {
+                        format!("{} - {}", title_str, artist_str)
+                    };
+                    cx.new(|_| Tooltip::new(text)).into()
+                })
+                // 序号 / 播放动画（固定宽度）
+                .child(if cur {
+                    div().flex_none().w(px(20.0)).h(px(18.0))
+                        .flex().items_end().justify_center()
+                        .gap(px(2.0))
+                        .child(div().w(px(3.0)).h(px(bar_h1))
+                            .rounded(px(1.0)).bg(t.accent_light))
+                        .child(div().w(px(3.0)).h(px(bar_h2))
+                            .rounded(px(1.0)).bg(t.accent_light))
+                        .child(div().w(px(3.0)).h(px(bar_h3))
+                            .rounded(px(1.0)).bg(t.accent_light))
+                        .into_any_element()
+                } else {
+                    div().flex_none().w(px(24.0)).text_xs().text_color(t.muted_fg)
+                        .text_center().child(format!("{}", ti + 1))
+                        .into_any_element()
+                })
+                // 封面（从缓存加载，没有则显示占位符）
+                .child(render_track_cover(track, t))
+                // 歌曲信息（flex_1 自动收缩）
+                .child(div().flex_1().flex_col().overflow_hidden()
+                    .justify_center()
+                    .gap(px(1.0))
+                    .child(div().text_sm().text_ellipsis().whitespace_nowrap()
+                        .text_color(if cur { t.accent_light } else { t.fg })
+                        .child(track.title.clone()))
+                    .child(div().text_xs().text_ellipsis().whitespace_nowrap()
+                        .text_color(t.muted_fg).child(track.artist.clone())))
+                // 时长（固定宽度）
+                .child(div().flex_none().pr_3().text_xs().text_color(t.muted_fg).child(dur))
+                .into_any_element()
+        }
+        ListItemRef::Loading { name } => {
+            div().id(("loading", ix as u64))
+                .w_full()
+                .h(px(56.0))  // 统一高度
+                .flex().items_center().justify_between()
+                .px_3().rounded_md()
+                .child(div().flex().items_center().gap_2()
+                    .child(div().text_color(t.accent_light).text_xs().child("⏳"))
+                    .child(div().text_color(t.fg).text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(name.to_string())))
+                .child(div().text_color(t.muted_fg).text_xs().child("加载中..."))
+                .into_any_element()
+        }
+    }
+}
+
+/// 渲染歌曲封面（从缓存加载，没有则显示占位符）
+fn render_track_cover(track: &crate::models::Track, t: &ThemeConfig) -> AnyElement {
+    // 如果有缓存的封面路径，尝试加载
+    if let Some(ref cover_path) = track.cover_path {
+        if let Ok(cover_data) = std::fs::read(cover_path) {
+            if let Ok(cover_img) = image::load_from_memory(&cover_data) {
+                let rgba = cover_img.to_rgba8();
+                let frame = image::Frame::new(rgba);
+                let render_img = std::sync::Arc::new(RenderImage::new(
+                    smallvec::SmallVec::from_elem(frame, 1)
+                ));
+                return div().flex_none().w(px(40.0)).h(px(40.0)).rounded_md()
+                    .overflow_hidden()
+                    .child(gpui::img(render_img)
+                        .w_full().h_full()
+                        .object_fit(gpui::ObjectFit::Cover))
+                    .into_any_element();
+            }
+        }
+    }
+    // 默认占位符
+    div().flex_none().w(px(40.0)).h(px(40.0)).rounded_md()
+        .bg(t.surface).flex().items_center().justify_center()
+        .text_xs().text_color(t.muted_fg).child("♪")
+        .into_any_element()
 }

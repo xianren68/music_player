@@ -45,9 +45,26 @@ pub fn build_center(
         // ── 曲目信息 ──
         .child(
             div().flex_col().items_center().text_center()
-                .child(div().text_2xl().font_weight(gpui::FontWeight::BOLD)
-                    .text_color(t.fg)
-                    .child(title.to_string()))
+                // 歌名：如果太长，循环滚动（跑马灯效果）
+                .child(
+                    div().w(px(400.0)).overflow_hidden()
+                        .child(
+                            div().text_2xl().font_weight(gpui::FontWeight::BOLD)
+                                .text_color(t.fg)
+                                .whitespace_nowrap()
+                                .child(title.to_string())
+                                .with_animation(
+                                    "title-scroll",
+                                    Animation::new(std::time::Duration::from_secs(12))
+                                        .repeat()
+                                        .with_easing(|t| t), // 线性
+                                    |this, delta| {
+                                        // delta 从 0 到 1，从右滚到左
+                                        this.relative().left(px((1.0 - delta) * 400.0 - 50.0))
+                                    }
+                                )
+                        )
+                )
                 .child(div().text_base().text_color(t.muted).mt_1()
                     .child(artist.to_string()))
         )

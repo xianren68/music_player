@@ -11,7 +11,10 @@ pub struct Track {
     pub artist: String,
     pub album: String,
     pub duration: f64,
-    /// 专辑封面（不序列化，运行时提取）
+    /// 专辑封面缩略图路径（持久化到磁盘的缩略图文件路径）
+    /// 运行时通过这个路径加载封面图片
+    pub cover_path: Option<String>,
+    /// 运行时加载的封面（不序列化）
     #[serde(skip)]
     #[allow(dead_code)]
     pub cover: Option<Arc<Vec<u8>>>,

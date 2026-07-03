@@ -559,27 +559,45 @@ impl MusicPlayer {
         let track_ref = &self.folders[fi].tracks[ti];
         self.player.play(track_ref);
         
-        // 提取专辑封面（如果还没有）
-        if self.folders[fi].tracks[ti].cover.is_none() {
-            if let Some(cover_data) = crate::audio::extract_cover(&self.folders[fi].tracks[ti].path) {
-                self.folders[fi].tracks[ti].cover = Some(std::sync::Arc::new(cover_data));
-            }
-        }
-        
-        // 转换封面为 RenderImage（用于显示）
-        self.current_cover = self.folders[fi].tracks[ti].cover.as_ref()
-            .and_then(|cover_data| {
-                // 解码图片
-                if let Ok(img) = image::load_from_memory(cover_data) {
-                    let rgba = img.to_rgba8();
-                    let frame = image::Frame::new(rgba);
-                    Some(Arc::new(RenderImage::new(
-                        smallvec::SmallVec::from_elem(frame, 1)
-                    )))
-                } else {
-                    None
+        // 在后台线程提取/加载专辑封面
+        let track_path_clone = track_path.clone();
+        let fi_clone = fi;
+        let ti_clone = ti;
+        cx.spawn(async move |this, cx| {
+            // 在后台线程提取封面并缓存
+            let cover_path = cx.background_spawn(async move {
+                crate::audio::extract_and_cache_cover(&track_path_clone)
+            }).await;
+            
+            // 更新 UI
+            this.update(cx, |this, cx| {
+                // 保存 cover_path 到 track
+                if let Some(folder) = this.folders.get_mut(fi_clone) {
+                    if let Some(track) = folder.tracks.get_mut(ti_clone) {
+                        track.cover_path = cover_path.clone();
+                    }
                 }
-            });
+                
+                // 加载封面并转换为 RenderImage
+                if let Some(ref cp) = cover_path {
+                    if let Ok(cover_data) = std::fs::read(cp) {
+                        if let Ok(img) = image::load_from_memory(&cover_data) {
+                            let rgba = img.to_rgba8();
+                            let frame = image::Frame::new(rgba);
+                            this.current_cover = Some(Arc::new(RenderImage::new(
+                                smallvec::SmallVec::from_elem(frame, 1)
+                            )));
+                        }
+                    }
+                } else {
+                    this.current_cover = None;
+                }
+                
+                // 保存缓存（持久化 cover_path）
+                this.save_settings_for_cache();
+                cx.notify();
+            }).ok();
+        }).detach();
         
         // 检查是否是同一首歌（避免重复加载歌词导致闪烁）
         let is_same_track = self.current == Some((fi, ti));
@@ -592,11 +610,54 @@ impl MusicPlayer {
         // 只有切换到不同歌曲时才加载歌词和重置位置
         if !is_same_track {
             self.load_lyrics(&track_path, &track_title);
-            self.lyric_line = None; // 切换歌曲才重置歌词行
+            self.lyric_line = None;
         }
-        // 同一首歌：保持当前 lyric_line 不变，避免闪烁
         
         self.spawn_progress_updater(cx);
+        // 启动封面批量加载（后台线程，为没有封面的歌曲提取封面）
+        self.spawn_cover_loader(cx);
+    }
+    
+    /// 后台批量加载封面（为所有没有 cover_path 的歌曲提取封面）
+    fn spawn_cover_loader(&mut self, cx: &mut Context<Self>) {
+        // 收集需要加载封面的歌曲路径
+        let tracks_to_load: Vec<(usize, usize, std::path::PathBuf)> = self.folders.iter().enumerate()
+            .flat_map(|(fi, f)| f.tracks.iter().enumerate().map(move |(ti, t)| (fi, ti, t.path.clone())))
+            .filter(|(_, _, path)| {
+                // 只加载没有缓存的
+                crate::audio::cover_cache_path(path).exists() == false
+            })
+            .take(50) // 每次最多加载 50 首，避免占用太长时间
+            .collect();
+        
+        if tracks_to_load.is_empty() {
+            return;
+        }
+        
+        cx.spawn(async move |this, cx| {
+            for (fi, ti, path) in tracks_to_load {
+                let path_clone = path.clone();
+                // 在后台线程提取封面
+                let cover_path = cx.background_spawn(async move {
+                    crate::audio::extract_and_cache_cover(&path_clone)
+                }).await;
+                
+                // 更新 track 的 cover_path
+                this.update(cx, |this, cx| {
+                    if let Some(folder) = this.folders.get_mut(fi) {
+                        if let Some(track) = folder.tracks.get_mut(ti) {
+                            track.cover_path = cover_path;
+                        }
+                    }
+                    cx.notify();
+                }).ok();
+            }
+            // 保存缓存
+            this.update(cx, |this, cx| {
+                this.save_settings_for_cache();
+                cx.notify();
+            }).ok();
+        }).detach();
     }
     
     /// 加载歌词
@@ -684,7 +745,7 @@ impl MusicPlayer {
 // ── UI 渲染 ──
 
 impl Render for MusicPlayer {
-    fn render(&mut self, _w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar_open = self.sidebar_open;
         let settings_open = self.settings_open;
         let opacity = self.slider.read(cx).value().start();
@@ -704,8 +765,12 @@ impl Render for MusicPlayer {
         let prog = if tot_t > 0.0 { cur_t / tot_t } else { 0.0 };
         let position_ms = (cur_t * 1000.0) as u32;
 
+        // 计算侧边栏列表可用高度（窗口高度 - topbar - 标题栏 - tabs）
+        let window_height = w.viewport_size().height;
+        let sidebar_list_height = (window_height - px(200.0)).max(px(200.0));
+        
         // 构建各模块
-        let sidebar = ui::sidebar::build_sidebar(&self.folders, &self.loading_folders, &self.current, &t, self.eq_phase, cx);
+        let sidebar = ui::sidebar::build_sidebar(&self.folders, &self.loading_folders, &t, sidebar_list_height, cx);
         let topbar = ui::topbar::build_topbar(sidebar_open, settings_open, &t, cx);
         
         // 歌词数据（传递给 center）
@@ -743,11 +808,11 @@ impl Render for MusicPlayer {
         };
 
         // 内容区（不含 topbar）：侧边栏 + 主区域 + 设置面板
-        let body = div().id("body").flex_1().flex().flex_row().overflow_hidden();
+        let body = div().id("body").flex_1().min_h_0().flex().flex_row().overflow_hidden();
         let body = body
             .when(sidebar_open, |this| this.child(sidebar))
             // 主区域：center(封面+信息) + player_bar(进度条+控制) 整体垂直居中
-            .child(div().id("main").size_full()
+            .child(div().id("main").flex_1().min_w_0()
                 .flex().flex_col().items_center().justify_center()
                 .child(center)
                 .child(player_bar))
