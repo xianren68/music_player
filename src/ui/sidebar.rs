@@ -146,9 +146,9 @@ pub fn build_sidebar(
                     this.cover_debounce_gen = this.cover_debounce_gen.wrapping_add(1);
                     let expected_gen = this.cover_debounce_gen;
                     cx.spawn(async move |this, cx| {
-                        // 防抖延迟 300ms：这段时间内如果又滚动了，gen 会变，老的定时器自动丢弃
+                        // 防抖延迟 800ms：这段时间内如果又滚动了，gen 会变，老的定时器自动丢弃
                         cx.background_spawn(async {
-                            std::thread::sleep(std::time::Duration::from_millis(300));
+                            std::thread::sleep(std::time::Duration::from_millis(800));
                         }).await;
                         this.update(cx, |this, cx| {
                             // 代数不匹配 → 中间有新渲染 → 丢弃本轮，让新的定时器处理
