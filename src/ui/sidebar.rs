@@ -117,14 +117,73 @@ pub fn build_sidebar(
                 let bar_h3 = 4.0 + 8.0 * (phase + 2.4).sin().abs();
 
                 let mut items: Vec<AnyElement> = Vec::with_capacity(range.end - range.start);
+                // 防抖收集：本轮渲染中需要加载封面的歌曲
+                let mut needs_cover: Vec<(usize, usize, std::path::PathBuf, String)> = Vec::new();
                 for ix in range {
                     let item = find_list_item(&this.folders, &this.loading_folders, ix);
                     if let Some(item) = item {
+                        // 封面懒加载防抖：歌曲出现在可视区域且没有封面缓存时，加入待处理队列
+                        if let ListItemRef::Track { fi, ti, track } = &item {
+                            if track.cover_path.is_none() {
+                                let key = track.path.to_string_lossy().to_string();
+                                let in_pending = this.pending_cover_loads.iter()
+                                    .any(|(_, _, _, k)| k == &key);
+                                if !this.loading_covers.contains(&key) && !in_pending {
+                                    needs_cover.push((*fi, *ti, track.path.clone(), key));
+                                }
+                            }
+                        }
                         items.push(render_list_item(
                             item, ix, this.current, &t_clone,
                             bar_h1, bar_h2, bar_h3, cx,
                         ));
                     }
+                }
+
+                // 有新封面需要加载 → 加入 pending 并启动/重置防抖定时器
+                if !needs_cover.is_empty() {
+                    this.pending_cover_loads.extend(needs_cover);
+                    this.cover_debounce_gen = this.cover_debounce_gen.wrapping_add(1);
+                    let expected_gen = this.cover_debounce_gen;
+                    cx.spawn(async move |this, cx| {
+                        // 防抖延迟 300ms：这段时间内如果又滚动了，gen 会变，老的定时器自动丢弃
+                        cx.background_spawn(async {
+                            std::thread::sleep(std::time::Duration::from_millis(300));
+                        }).await;
+                        this.update(cx, |this, cx| {
+                            // 代数不匹配 → 中间有新渲染 → 丢弃本轮，让新的定时器处理
+                            if this.cover_debounce_gen != expected_gen {
+                                return;
+                            }
+                            // 防抖到点，批量处理所有待加载封面
+                            for (fi, ti, path, key) in std::mem::take(&mut this.pending_cover_loads) {
+                                // 安全检查：文件夹/歌曲索引可能已变化
+                                if fi >= this.folders.len() { continue; }
+                                if ti >= this.folders[fi].tracks.len() { continue; }
+                                if this.folders[fi].tracks[ti].path != path { continue; }
+                                this.loading_covers.insert(key.clone());
+                                let fi2 = fi;
+                                let ti2 = ti;
+                                cx.spawn(async move |this, cx| {
+                                    let cover_path = cx.background_spawn(async move {
+                                        crate::audio::extract_and_cache_cover(&path)
+                                    }).await;
+                                    this.update(cx, |this, cx| {
+                                        this.loading_covers.remove(&key);
+                                        if let Some(folder) = this.folders.get_mut(fi2) {
+                                            if let Some(track) = folder.tracks.get_mut(ti2) {
+                                                if track.cover_path.is_none() {
+                                                    track.cover_path = cover_path;
+                                                    this.save_settings_for_cache();
+                                                }
+                                            }
+                                        }
+                                        cx.notify();
+                                    }).ok();
+                                }).detach();
+                            }
+                        }).ok();
+                    }).detach();
                 }
                 items
             }),

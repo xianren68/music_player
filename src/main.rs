@@ -55,6 +55,12 @@ struct MusicPlayer {
     loading_folders: Vec<SharedString>,
     /// 当前播放曲目的专辑封面（渲染用）
     current_cover: Option<Arc<RenderImage>>,
+    /// 正在后台加载封面的歌曲路径（防止重复触发懒加载）
+    loading_covers: std::collections::HashSet<String>,
+    /// 等待防抖后加载的封面列表 (fi, ti, 文件路径, 查找key)
+    pending_cover_loads: Vec<(usize, usize, std::path::PathBuf, String)>,
+    /// 封面加载防抖的代数（每次新渲染递增，定时器只处理最后一轮）
+    cover_debounce_gen: u64,
     /// 均衡器动画相位（用于播放时三条竖条的高度跳动）
     eq_phase: u32,
     /// 当前歌词
@@ -145,6 +151,9 @@ impl MusicPlayer {
             music_folder_paths: saved.music_folders.iter().map(|s| s.clone().into()).collect(),
             loading_folders: Vec::new(),
             current_cover: None,
+            loading_covers: std::collections::HashSet::new(),
+            pending_cover_loads: Vec::new(),
+            cover_debounce_gen: 0,
             eq_phase: 0,
             lyrics: None,
             lyric_line: None,
@@ -179,8 +188,6 @@ impl MusicPlayer {
                     }
                 }
             }
-            // 后台重新加载封面
-            self.spawn_cover_loader(cx);
             return;
         }
 
@@ -640,50 +647,7 @@ impl MusicPlayer {
         }
         
         self.spawn_progress_updater(cx);
-        // 启动封面批量加载（后台线程，为没有封面的歌曲提取封面）
-        self.spawn_cover_loader(cx);
-    }
-    
-    /// 后台批量加载封面（为所有没有 cover_path 的歌曲提取封面）
-    fn spawn_cover_loader(&mut self, cx: &mut Context<Self>) {
-        // 收集需要加载封面的歌曲路径
-        let tracks_to_load: Vec<(usize, usize, std::path::PathBuf)> = self.folders.iter().enumerate()
-            .flat_map(|(fi, f)| f.tracks.iter().enumerate().map(move |(ti, t)| (fi, ti, t.path.clone())))
-            .filter(|(_, _, path)| {
-                // 只加载没有缓存的
-                crate::audio::cover_cache_path(path).exists() == false
-            })
-            .take(50) // 每次最多加载 50 首，避免占用太长时间
-            .collect();
-        
-        if tracks_to_load.is_empty() {
-            return;
-        }
-        
-        cx.spawn(async move |this, cx| {
-            for (fi, ti, path) in tracks_to_load {
-                let path_clone = path.clone();
-                // 在后台线程提取封面
-                let cover_path = cx.background_spawn(async move {
-                    crate::audio::extract_and_cache_cover(&path_clone)
-                }).await;
-                
-                // 更新 track 的 cover_path
-                this.update(cx, |this, cx| {
-                    if let Some(folder) = this.folders.get_mut(fi) {
-                        if let Some(track) = folder.tracks.get_mut(ti) {
-                            track.cover_path = cover_path;
-                        }
-                    }
-                    cx.notify();
-                }).ok();
-            }
-            // 保存缓存
-            this.update(cx, |this, cx| {
-                this.save_settings_for_cache();
-                cx.notify();
-            }).ok();
-        }).detach();
+        // 封面采用懒加载策略：侧边栏滚动到该歌曲时触发，不再批量预加载
     }
     
     /// 加载歌词
