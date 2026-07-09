@@ -4,6 +4,18 @@ use std::sync::Arc;
 use crate::theme::ThemeConfig;
 use crate::lyrics::Lyrics;
 
+/// 估算文本渲染宽度（用于判断歌名是否超出容器）
+/// font_size: 字体像素大小（text_2xl ≈ 24px）
+fn estimate_text_width(text: &str, font_size: f32) -> f32 {
+    text.chars().map(|c| {
+        if c.is_ascii() {
+            font_size * 0.6  // ASCII 字符约为半宽（加粗略宽）
+        } else {
+            font_size * 1.05 // CJK 等宽字符为全宽（加粗略宽）
+        }
+    }).sum()
+}
+
 pub fn build_center(
     title: &str,
     artist: &str,
@@ -17,6 +29,10 @@ pub fn build_center(
 ) -> AnyElement {
     // 歌词区域高度（固定高度）
     let lyric_height = px(120.0);
+
+    // 估算歌名宽度，超出 400px 才启用滚动
+    let title_w = estimate_text_width(title, 24.0); // text_2xl ≈ 24px
+    let should_scroll = title_w > 400.0;
 
     div().id("center")
         .flex().flex_col().items_center()
@@ -45,15 +61,16 @@ pub fn build_center(
         // ── 曲目信息 ──
         .child(
             div().flex_col().items_center().text_center()
-                // 歌名：如果太长，循环滚动（跑马灯效果）
+                // 歌名：超出容器宽度时才循环滚动
                 .child(
                     div().w(px(400.0)).overflow_hidden()
-                        .child(
-                            div().text_2xl().font_weight(gpui::FontWeight::BOLD)
+                        .child({
+                            let base = div().text_2xl().font_weight(gpui::FontWeight::BOLD)
                                 .text_color(t.fg)
                                 .whitespace_nowrap()
-                                .child(title.to_string())
-                                .with_animation(
+                                .child(title.to_string());
+                            if should_scroll {
+                                base.with_animation(
                                     "title-scroll",
                                     Animation::new(std::time::Duration::from_secs(12))
                                         .repeat()
@@ -62,8 +79,11 @@ pub fn build_center(
                                         // delta 从 0 到 1，从右滚到左
                                         this.relative().left(px((1.0 - delta) * 400.0 - 50.0))
                                     }
-                                )
-                        )
+                                ).into_any_element()
+                            } else {
+                                base.into_any_element()
+                            }
+                        })
                 )
                 .child(div().text_base().text_color(t.muted).mt_1()
                     .child(artist.to_string()))

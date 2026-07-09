@@ -22,17 +22,34 @@ pub fn covers_dir() -> std::path::PathBuf {
     dir
 }
 
+/// 清理旧版本的封面缓存（不带 v2_ 前缀的低分辨率文件）
+pub fn cleanup_old_covers() {
+    let dir = covers_dir();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                // 删除不带 v2_ 前缀的旧缓存文件（包括 jpg 和 png）
+                if !name.starts_with("v2_") && (name.ends_with(".jpg") || name.ends_with(".png")) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
 /// 根据 track 路径生成封面缩略图的缓存文件路径
+/// v2_ 前缀：高分辨率版本（400x400 PNG），与旧版 80x80 JPEG 区分
 pub fn cover_cache_path(track_path: &Path) -> std::path::PathBuf {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     track_path.hash(&mut hasher);
     let hash = hasher.finish();
-    covers_dir().join(format!("{:016x}.jpg", hash))
+    covers_dir().join(format!("v2_{:016x}.png", hash))
 }
 
-/// 提取封面并保存为缩略图（80x80 JPEG），返回缓存路径
+/// 提取封面并保存为缩略图（400x400 PNG），返回缓存路径
+/// 使用 PNG 格式避免 JPEG YCbCr → sRGB 颜色空间转换导致的色偏
 pub fn extract_and_cache_cover(track_path: &Path) -> Option<String> {
     // 先检查缓存
     let cache_path = cover_cache_path(track_path);
@@ -43,16 +60,12 @@ pub fn extract_and_cache_cover(track_path: &Path) -> Option<String> {
     // 提取原始封面
     let cover_data = extract_cover(track_path)?;
 
-    // 缩放为 80x80 缩略图并保存为 JPEG
+    // 缩放为 400x400 缩略图并保存为 PNG（无损，保留完整颜色信息）
     if let Ok(img) = image::load_from_memory(&cover_data) {
-        // 用 resize_exact 确保得到 80x80 的图片（不保持宽高比）
-        let thumb = img.resize_exact(80, 80, image::imageops::FilterType::Lanczos3);
-        let thumb_rgb = thumb.to_rgb8();
-        let (w, h) = (thumb_rgb.width(), thumb_rgb.height());
-        let mut buf = std::io::Cursor::new(Vec::new());
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 80);
-        if encoder.encode(&thumb_rgb, w, h, image::ExtendedColorType::Rgb8).is_ok() {
-            let _ = std::fs::write(&cache_path, buf.into_inner());
+        // resize 保持宽高比（专辑封面通常为正方形）
+        let thumb = img.resize(400, 400, image::imageops::FilterType::Lanczos3);
+        // 直接保存为 PNG（支持 RGBA，无损压缩，避免颜色空间转换问题）
+        if thumb.save(&cache_path).is_ok() {
             return cache_path.to_str().map(|s| s.to_string());
         }
     }

@@ -109,7 +109,11 @@ impl MusicPlayer {
         let bg_image = saved.bg_image_path.as_ref().and_then(|path| {
             std::fs::read(path).ok().and_then(|bytes| {
                 image::load_from_memory(&bytes).ok().map(|img| {
-                    let rgba = img.to_rgba8();
+                    let mut rgba = img.to_rgba8();
+                    // GPUI 的 RenderImage 期望 BGRA 格式，需要交换 R/B 通道
+                    for pixel in rgba.pixels_mut() {
+                        pixel.0.swap(0, 2);
+                    }
                     let frame = image::Frame::new(rgba);
                     Arc::new(RenderImage::new(
                         smallvec::SmallVec::from_elem(frame, 1)
@@ -146,6 +150,8 @@ impl MusicPlayer {
             lyric_line: None,
         };
         // 自动加载已保存的音乐目录（需要在 cx 可用后调用）
+        // 清理旧版封面缓存文件（不带 v2_ 前缀的 80x80 低分辨率版本）
+        crate::audio::cleanup_old_covers();
         this.load_music_folder(cx);
         this
     }
@@ -163,6 +169,18 @@ impl MusicPlayer {
                 saved.cached_folders.len(),
                 saved.cached_folders.iter().map(|f| f.tracks.len()).sum::<usize>());
             self.folders = saved.cached_folders;
+            // 验证 cover_path 有效性（旧版缓存文件可能已被清理）
+            for folder in &mut self.folders {
+                for track in &mut folder.tracks {
+                    if let Some(ref cp) = track.cover_path {
+                        if !std::path::Path::new(cp).exists() {
+                            track.cover_path = None;
+                        }
+                    }
+                }
+            }
+            // 后台重新加载封面
+            self.spawn_cover_loader(cx);
             return;
         }
 
@@ -332,7 +350,11 @@ impl MusicPlayer {
             // 加载图片为纹理
             if let Ok(bytes) = std::fs::read(&path) {
                 if let Ok(img) = image::load_from_memory(&bytes) {
-                    let rgba = img.to_rgba8();
+                    let mut rgba = img.to_rgba8();
+                    // GPUI 的 RenderImage 期望 BGRA 格式，需要交换 R/B 通道
+                    for pixel in rgba.pixels_mut() {
+                        pixel.0.swap(0, 2);
+                    }
                     let frame = image::Frame::new(rgba);
                     self.bg_image = Some(Arc::new(RenderImage::new(
                         smallvec::SmallVec::from_elem(frame, 1)
@@ -582,7 +604,11 @@ impl MusicPlayer {
                 if let Some(ref cp) = cover_path {
                     if let Ok(cover_data) = std::fs::read(cp) {
                         if let Ok(img) = image::load_from_memory(&cover_data) {
-                            let rgba = img.to_rgba8();
+                            let mut rgba = img.to_rgba8();
+                            // GPUI 的 RenderImage 期望 BGRA 格式，需要交换 R/B 通道
+                            for pixel in rgba.pixels_mut() {
+                                pixel.0.swap(0, 2);
+                            }
                             let frame = image::Frame::new(rgba);
                             this.current_cover = Some(Arc::new(RenderImage::new(
                                 smallvec::SmallVec::from_elem(frame, 1)

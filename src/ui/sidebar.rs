@@ -264,7 +264,11 @@ fn render_track_cover(track: &crate::models::Track, t: &ThemeConfig) -> AnyEleme
     if let Some(ref cover_path) = track.cover_path {
         if let Ok(cover_data) = std::fs::read(cover_path) {
             if let Ok(cover_img) = image::load_from_memory(&cover_data) {
-                let rgba = cover_img.to_rgba8();
+                let mut rgba = cover_img.to_rgba8();
+                // GPUI 的 RenderImage 期望 BGRA 格式，需要交换 R/B 通道
+                for pixel in rgba.pixels_mut() {
+                    pixel.0.swap(0, 2);
+                }
                 let frame = image::Frame::new(rgba);
                 let render_img = std::sync::Arc::new(RenderImage::new(
                     smallvec::SmallVec::from_elem(frame, 1)
