@@ -5,6 +5,7 @@ mod ui;
 mod theme;
 mod settings;
 mod lyrics;
+mod media_session;
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
@@ -12,7 +13,10 @@ use gpui_component::{slider::*};
 use theme::ThemeConfig;
 use settings::AppSettings;
 use std::sync::Arc;
+use std::sync::{Mutex, mpsc::{channel, Sender}};
 use std::time::{Duration, Instant};
+use souvlaki::MediaControlEvent;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use models::Folder;
 use audio::Player;
@@ -63,6 +67,12 @@ struct MusicPlayer {
     cover_debounce_gen: u64,
     /// 均衡器动画相位（用于播放时三条竖条的高度跳动）
     eq_phase: u32,
+    /// 系统媒体会话（任务栏/锁屏"正在播放"集成，souvlaki 封装）
+    media: Option<crate::media_session::MediaSession>,
+    /// 媒体会话事件发送端（render 首次拿到窗口句柄后用于重建会话）
+    media_tx: Option<Sender<MediaControlEvent>>,
+    /// 媒体会话是否已用窗口句柄初始化（避免 render 中重复创建）
+    media_initialized: bool,
     /// 当前歌词
     lyrics: Option<lyrics::Lyrics>,
     /// 当前歌词行索引
@@ -155,9 +165,40 @@ impl MusicPlayer {
             pending_cover_loads: Vec::new(),
             cover_debounce_gen: 0,
             eq_phase: 0,
+            media: None,
+            media_tx: None,
+            media_initialized: false,
             lyrics: None,
             lyric_line: None,
         };
+
+        // 创建媒体会话事件通道，并启动监听循环。
+        // 注意：Windows 上 SMTC 需要有效的窗口句柄(hwnd)才能显示，
+        // 而 hwnd 只有在窗口创建后才能拿到，因此媒体会话本身推迟到
+        // render 首次调用时（已有 w: &mut Window）再用真实 hwnd 创建。
+        let (media_tx, media_rx) = channel::<MediaControlEvent>();
+        this.media_tx = Some(media_tx);
+        {
+            // 用后台线程监听 channel，把系统媒体键事件转发回应用
+            let rx = Arc::new(Mutex::new(media_rx));
+            let rx2 = rx.clone();
+            cx.spawn(async move |this, cx| {
+                loop {
+                    // 在后台线程阻塞等待事件，避免占用 GPUI 主执行器
+                    let evt = cx.background_spawn({
+                        let rx = rx2.clone();
+                        async move { rx.lock().unwrap().recv().ok() }
+                    }).await;
+                    match evt {
+                        Some(evt) => {
+                            this.update(cx, |this, cx| this.handle_media_control(evt, cx)).ok();
+                        }
+                        None => break, // channel 已断开，退出循环
+                    }
+                }
+            }).detach();
+        }
+
         // 自动加载已保存的音乐目录（需要在 cx 可用后调用）
         // 清理旧版封面缓存文件（不带 v2_ 前缀的 80x80 低分辨率版本）
         crate::audio::cleanup_old_covers();
@@ -279,6 +320,11 @@ impl MusicPlayer {
     }
 
     fn play_pause(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_playback(cx);
+    }
+
+    /// 播放/暂停核心逻辑（供 UI 按钮和系统媒体键共用）
+    fn toggle_playback(&mut self, cx: &mut Context<Self>) {
         if self.current.is_none() {
             if let Some((fi, ti)) = self.first() {
                 self.play(fi, ti, cx);
@@ -296,10 +342,16 @@ impl MusicPlayer {
             self.player.toggle(false);
         }
         self.playing = !self.playing;
+        self.sync_media_session(cx);
         cx.notify();
     }
 
     fn next(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        self.next_track(cx);
+    }
+
+    /// 下一首核心逻辑（供 UI 按钮和系统媒体键共用）
+    fn next_track(&mut self, cx: &mut Context<Self>) {
         if let Some((fi, ti)) = self.current {
             if let Some((f, t)) = self.next_idx(fi, ti) {
                 self.play(f, t, cx);
@@ -309,12 +361,54 @@ impl MusicPlayer {
     }
 
     fn prev(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        self.prev_track(cx);
+    }
+
+    /// 上一首核心逻辑（供 UI 按钮和系统媒体键共用）
+    fn prev_track(&mut self, cx: &mut Context<Self>) {
         if let Some((fi, ti)) = self.current {
             if let Some((f, t)) = self.prev_idx(fi, ti) {
                 self.play(f, t, cx);
                 cx.notify();
             }
         }
+    }
+
+    /// 处理系统媒体指令（来自任务栏控件 / 锁屏 / 键盘媒体键）
+    fn handle_media_control(&mut self, evt: MediaControlEvent, cx: &mut Context<Self>) {
+        use MediaControlEvent::*;
+        match evt {
+            Play => { if !self.playing { self.toggle_playback(cx); } }
+            Pause => { if self.playing { self.toggle_playback(cx); } }
+            Toggle => { self.toggle_playback(cx); }
+            Next => { self.next_track(cx); }
+            Previous => { self.prev_track(cx); }
+            Stop => {
+                self.player.stop();
+                self.playing = false;
+                self.sync_media_session(cx);
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// 把当前播放状态（歌名/歌手/专辑/封面/播放中）同步到系统媒体会话
+    fn sync_media_session(&mut self, _cx: &mut Context<Self>) {
+        let Some(media) = &mut self.media else {
+            eprintln!("[media] sync: media 为 None，跳过（媒体会话未初始化）");
+            return;
+        };
+        if let Some((fi, ti)) = self.current {
+            if let Some(track) = self.folders.get(fi).and_then(|f| f.tracks.get(ti)) {
+                media.set_metadata(&track.title, &track.artist, &track.album, track.cover_path.as_deref());
+            } else {
+                eprintln!("[media] sync: current=({fi},{ti}) 但 track 不存在");
+            }
+        } else {
+            eprintln!("[media] sync: current 为 None（还没选歌），只更新播放状态");
+        }
+        media.set_playback(self.playing);
     }
 
     fn play_at(&mut self, fi: usize, ti: usize, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
@@ -628,6 +722,8 @@ impl MusicPlayer {
                 
                 // 保存缓存（持久化 cover_path）
                 this.save_settings_for_cache();
+                // 封面提取完成后，把封面也同步到系统媒体会话
+                this.sync_media_session(cx);
                 cx.notify();
             }).ok();
         }).detach();
@@ -639,6 +735,9 @@ impl MusicPlayer {
         self.playing = true;
         self.play_offset = 0.0;
         self.play_start = Some(Instant::now());
+
+        // 同步系统媒体会话（任务栏/锁屏"正在播放"）
+        self.sync_media_session(cx);
 
         // 只有切换到不同歌曲时才加载歌词和重置位置
         if !is_same_track {
@@ -743,6 +842,26 @@ impl Render for MusicPlayer {
         let t = self.theme.clone();
         let theme_mode = self.theme_mode.clone();
 
+        // ── 系统媒体会话懒初始化 ──
+        // Windows 用 ISystemMediaTransportControlsInterop::GetForWindow(hwnd) 拿到
+        // 绑定本窗口的 SMTC（驱动任务栏缩略图控件 + 音量弹出"正在播放"卡片）。
+        // 其他平台用 souvlaki。都在首次 render 时创建（此时已有真实窗口句柄，
+        // 且 foreground 线程就绪、WinRT 可正常调用）。
+        if !self.media_initialized {
+            if let Some(tx) = &self.media_tx {
+                // 取真实窗口句柄，用于把 SMTC 绑定到本窗口
+                let hwnd = get_window_hwnd(w);
+                if let Some(media) = crate::media_session::MediaSession::new(tx.clone(), hwnd) {
+                    self.media = Some(media);
+                    self.media_initialized = true;
+                    eprintln!("[media] SMTC 会话已初始化（绑定窗口 hwnd={:?}）", hwnd);
+                    self.sync_media_session(cx);
+                } else {
+                    eprintln!("[media] 警告：MediaSession::new 返回 None（SMTC 创建失败）");
+                }
+            }
+        }
+
         // 获取当前曲目信息
         let (title, artist, album) = self.current
             .and_then(|(fi, ti)| self.folders.get(fi).and_then(|f| f.tracks.get(ti)))
@@ -825,6 +944,22 @@ impl Render for MusicPlayer {
         // 根容器
         let root = div().id("root").size_full().relative();
         root.child(bg_layer).child(content)
+    }
+}
+
+// ── 系统媒体会话辅助 ──
+
+/// 从 GPUI 的 Window 取出真实的 Win32 窗口句柄（HWND），用于把 SMTC 绑定到本窗口。
+/// 返回原始指针；若取不到则返回 null。
+fn get_window_hwnd(w: &Window) -> *mut std::ffi::c_void {
+    // Window 自带一个返回 AnyWindowHandle 的同名固有方法，会遮蔽 trait 方法，
+    // 这里显式用 HasWindowHandle::window_handle 拿到原始窗口句柄。
+    match HasWindowHandle::window_handle(w) {
+        Ok(handle) => match handle.as_raw() {
+            RawWindowHandle::Win32(win32) => win32.hwnd.get() as *mut std::ffi::c_void,
+            _ => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
     }
 }
 
