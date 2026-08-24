@@ -3,6 +3,8 @@ use std::path::Path;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::probe::Probe;
 use lofty::tag::ItemKey;
+// id3 的 title()/artist()/album() 是 TagLike trait 提供的方法，必须导入 trait 才能调用
+use id3::TagLike;
 
 use crate::models::Track;
 
@@ -79,71 +81,203 @@ pub fn load_cover_from_cache(cover_path: &str) -> Option<Vec<u8>> {
 /// 读取音频文件元数据。
 ///
 /// 设计：扩展名命中白名单的文件**无论如何都加入列表**——lofty 解析整文件失败
-/// （文件损坏 / 编码不支持如部分 ALAC·DRM 的 m4a / 非 PCM 的 wav 等）时不丢弃，
-/// 退化为仅填充 path + 文件名 + 空歌手/专辑 + duration=0 的 Track，照样进扫描结果。
-/// 调用方无需再处理"读不出就跳过"，自然不再有"少了歌"的现象。
-pub fn read_meta(path: &Path) -> Track {
-    // 文件名兜底（扩展名命中白名单但读不出标签时，标题用文件名）
+/// 读取音频文件元数据。
+///
+/// 主路径用 lofty（快、格式支持广）；当 lofty 整文件解析失败
+/// （文件损坏 / 编码不支持 / 某些带异常帧的 MP3 等）时：
+/// - 若是 MP3，用 `id3` crate 回退读取——其容错极强，能跳过 lofty 会整体
+///   报错的异常帧（如部分 APIC / 自定义 TXXX），从而拿到真标题/歌手/专辑，
+///   时长再用 `mp3_duration` 单独估算（只扫帧头、不解析标签，标签损坏也能算）；
+/// - 其它格式或 id3 也失败，则退化为仅文件名 + 空歌手专辑 + duration=0 的
+///   Track，照样进扫描结果（不再有"少了歌"的现象）。
+pub fn read_meta(path: &Path) -> Track {    // 文件名兜底（读不出标签时，标题用文件名）
     let fallback_title = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("未知")
         .to_string();
 
-    // 尝试用 lofty 完整解析；任何一步失败都退化为"仅文件名"兜底（仍返回 Track）。
-    // 注意：tag 是借用解析结果 f 的引用，必须在 Some 分支内就地解析成 owned 的
-    // String，不能把引用带出 match，否则会悬垂（E0597）。
+    // 主路径：lofty 完整解析
     let parsed = Probe::open(path)
         .ok()
         .and_then(|p| p.guess_file_type().ok())
         .and_then(|p| p.read().ok());
 
-    let (dur, title, artist, album): (f64, String, String, String) = match parsed {
-        Some(f) => {
-            let dur = f.properties().duration().as_secs_f64();
-            let tag = f.first_tag();
-            let title = tag
-                .and_then(|t| t.get_string(&ItemKey::TrackTitle))
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| fallback_title.clone());
-            let artist = tag
-                .and_then(|t| t.get_string(&ItemKey::TrackArtist))
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-            let album = tag
-                .and_then(|t| t.get_string(&ItemKey::AlbumTitle))
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-            (dur, title, artist, album)
+    if let Some(f) = parsed {
+        let dur = f.properties().duration().as_secs_f64();
+        let tag = f.first_tag();
+        let title = tag
+            .and_then(|t| t.get_string(&ItemKey::TrackTitle))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| fallback_title.clone());
+        let artist = tag
+            .and_then(|t| t.get_string(&ItemKey::TrackArtist))
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let album = tag
+            .and_then(|t| t.get_string(&ItemKey::AlbumTitle))
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        Track {
+            path: path.into(),
+            title,
+            artist,
+            album,
+            duration: dur,
+            cover_path: cached_cover_path(path),
+            cover: None,
         }
-        None => {
-            eprintln!(
-                "[扫描] read_meta 退化兜底（元数据缺失，仍加入列表）: {}",
-                path.display()
-            );
-            (0.0, fallback_title.clone(), String::new(), String::new())
+    } else {
+        // lofty 失败：MP3 用 id3 回退，其它格式直接退化兜底
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_lowercase());
+        if ext.as_deref() == Some("mp3") {
+            if let Some(t) = read_meta_id3(path, &fallback_title) {
+                return t;
+            }
         }
-    };
+        eprintln!(
+            "[扫描] read_meta 退化兜底（元数据缺失，仍加入列表）: {}",
+            path.display()
+        );
+        Track {
+            path: path.into(),
+            title: fallback_title,
+            artist: String::new(),
+            album: String::new(),
+            duration: 0.0,
+            cover_path: cached_cover_path(path),
+            cover: None,
+        }
+    }
+}
 
-    // 检查封面缓存是否存在
-    let cover_path = {
-        let cp = cover_cache_path(path);
-        if cp.exists() {
-            cp.to_str().map(|s| s.to_string())
-        } else {
-            None
-        }
-    };
+/// 封面缓存路径是否已存在（lofty/id3 提取过的都会落盘到同一缓存路径）
+fn cached_cover_path(path: &Path) -> Option<String> {
+    let cp = cover_cache_path(path);
+    if cp.exists() {
+        cp.to_str().map(|s| s.to_string())
+    } else {
+        None
+    }
+}
 
-    Track {
+/// lofty 解析失败时，对 MP3 用 `id3` crate 回退读取元数据。
+/// 返回 None 表示 id3 也读不出（极少见，如文件完全损坏），调用方会退化为文件名兜底。
+fn read_meta_id3(path: &Path, fallback_title: &str) -> Option<Track> {
+    let tag = id3::Tag::read_from_path(path).ok()?;
+    // 标题优先标准 TIT2；没有再回退文件名（TIT3 多为空或描述性，不优先）
+    let title = tag
+        .title()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| fallback_title.to_string());
+    let artist = tag.artist().map(|s| s.to_string()).unwrap_or_default();
+    let album = tag.album().map(|s| s.to_string()).unwrap_or_default();
+    // 时长单独用 mp3_duration 估算（只扫帧头，不解析标签，损坏也不影响）
+    let duration = mp3_duration::from_path(path)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    Some(Track {
         path: path.into(),
         title,
         artist,
         album,
-        duration: dur,
-        cover_path,
+        duration,
+        cover_path: cached_cover_path(path),
         cover: None,
+    })
+}
+
+/// 写回音频文件标签（标题/歌手/专辑）。
+///
+/// 主路径用 lofty：`read_from_path` 打开 → 改标签字段（Accessor 的 set_title 等）
+/// → `save_to_path` 落盘。lofty 解析失败时（如 MINI姐 那批读都读不出的 MP3），
+/// 若扩展名是 mp3，回退用 `id3` crate 写 ID3v2 标签（`Tag::write_to_path`）。
+/// 返回错误信息供 UI 提示（文件被占用/只读等）。
+pub fn write_meta(path: &Path, title: &str, artist: &str, album: &str) -> Result<(), String> {
+    // 主路径：lofty 读写（MP3 写 ID3v2、FLAC 写 Vorbis、M4A 写 MP4，按文件类型自动处理）
+    match write_meta_lofty(path, title, artist, album) {
+        Ok(()) => return Ok(()),
+        Err(lofty_err) => {
+            // lofty 失败（读取阶段就失败的文件 lofty 也无法写）：若是 MP3 用 id3 回退
+            let ext = path.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase());
+            if ext.as_deref() == Some("mp3") {
+                if let Ok(()) = write_meta_id3(path, title, artist, album) {
+                    return Ok(());
+                }
+            }
+            Err(lofty_err)
+        }
     }
+}
+
+/// 用 lofty 写标签（能覆盖 MP3/FLAC/M4A/OGG 等绝大多数格式）
+fn write_meta_lofty(path: &Path, title: &str, artist: &str, album: &str) -> Result<(), String> {
+    use lofty::config::WriteOptions;
+    use lofty::file::{AudioFile, TaggedFileExt};
+    use lofty::tag::Accessor;
+
+    let mut tagged = lofty::read_from_path(path).map_err(|e| format!("读取失败: {e}"))?;
+
+    // 取第一个标签；若文件完全没有标签，新建一个该格式默认类型的标签
+    if tagged.first_tag().is_none() {
+        let tt = tagged.file_type().primary_tag_type();
+        tagged.insert_tag(lofty::tag::Tag::new(tt));
+    }
+    let Some(tag) = tagged.first_tag_mut() else {
+        return Err("该文件不支持写入标签".into());
+    };
+
+    // 空字符串 = 删除该字段，否则设置新值
+    if title.is_empty() {
+        tag.remove_title();
+    } else {
+        tag.set_title(title.to_string());
+    }
+    if artist.is_empty() {
+        tag.remove_artist();
+    } else {
+        tag.set_artist(artist.to_string());
+    }
+    if album.is_empty() {
+        tag.remove_album();
+    } else {
+        tag.set_album(album.to_string());
+    }
+
+    tagged
+        .save_to_path(path, WriteOptions::default())
+        .map_err(|e| format!("写入失败: {e}"))
+}
+
+/// 用 id3 crate 写 MP3 标签（lofty 读不出的带异常帧 MP3 也能写）
+fn write_meta_id3(path: &Path, title: &str, artist: &str, album: &str) -> Result<(), String> {
+    use id3::TagLike;
+
+    // 能读到现有标签则在其上修改；读不到（全新文件）则新建空标签
+    let mut tag = match id3::Tag::read_from_path(path) {
+        Ok(t) => t,
+        Err(_) => id3::Tag::new(),
+    };
+    if title.is_empty() {
+        tag.remove_title();
+    } else {
+        tag.set_title(title.to_string());
+    }
+    if artist.is_empty() {
+        tag.remove_artist();
+    } else {
+        tag.set_artist(artist.to_string());
+    }
+    if album.is_empty() {
+        tag.remove_album();
+    } else {
+        tag.set_album(album.to_string());
+    }
+    tag.write_to_path(path, id3::Version::Id3v24)
+        .map_err(|e| format!("写入失败: {e}"))
 }
 
 /// 从音频文件提取专辑封面（原始数据）
