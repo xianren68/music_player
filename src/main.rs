@@ -10,6 +10,7 @@ mod media_session;
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use gpui_component::{slider::*};
+use gpui_component::input::{InputState, InputEvent};
 use theme::ThemeConfig;
 use settings::AppSettings;
 use std::sync::Arc;
@@ -77,6 +78,12 @@ struct MusicPlayer {
     lyrics: Option<lyrics::Lyrics>,
     /// 当前歌词行索引
     lyric_line: Option<usize>,
+    /// 搜索输入框状态（懒初始化，render 首次拿到窗口句柄后创建）
+    search_input: Option<Entity<InputState>>,
+    /// 搜索输入框的变更订阅（必须持有，否则渲染结束后订阅被释放、搜索失效）
+    search_sub: Option<Subscription>,
+    /// 当前搜索关键字（非空时侧边栏切换为扁平搜索结果视图）
+    search_query: String,
 }
 
 actions!(music_player, [ToggleSidebar, ToggleSettings, AddFolder, PlayPause, Next, Prev]);
@@ -170,6 +177,9 @@ impl MusicPlayer {
             media_initialized: false,
             lyrics: None,
             lyric_line: None,
+            search_input: None,
+            search_sub: None,
+            search_query: String::new(),
         };
 
         // 创建媒体会话事件通道，并启动监听循环。
@@ -878,8 +888,42 @@ impl Render for MusicPlayer {
         let window_height = w.viewport_size().height;
         let sidebar_list_height = (window_height - px(200.0)).max(px(200.0));
         
+        // ── 搜索输入框懒初始化 ──
+        // InputState::new 需要窗口句柄，故推迟到 render 首次拿到 &mut Window 时创建。
+        // cx.new 的闭包只接收 &mut Context<InputState>，window 从外部捕获。
+        if self.search_input.is_none() {
+            let input = cx.new(|cx2| {
+                let mut s = InputState::new(w, cx2);
+                // 搜索栏占位提示
+                s.set_placeholder("搜索歌曲、歌手...", w, cx2);
+                // 按 Esc 清空搜索
+                s = s.clean_on_escape();
+                s
+            });
+            // 订阅文本变化：把最新值同步到 search_query 并触发重绘
+            let sub = cx.subscribe(&input, {
+                let inp = input.clone();
+                move |this, _entity, event, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.search_query = inp.read(cx).value().to_string();
+                        cx.notify();
+                    }
+                }
+            });
+            self.search_input = Some(input);
+            self.search_sub = Some(sub);
+        }
+
         // 构建各模块
-        let sidebar = ui::sidebar::build_sidebar(&self.folders, &self.loading_folders, &t, sidebar_list_height, cx);
+        let sidebar = ui::sidebar::build_sidebar(
+            &self.folders,
+            &self.loading_folders,
+            &t,
+            sidebar_list_height,
+            self.search_input.as_ref().unwrap(),
+            &self.search_query,
+            cx,
+        );
         let topbar = ui::topbar::build_topbar(sidebar_open, settings_open, &t, cx);
         
         // 歌词数据（传递给 center）

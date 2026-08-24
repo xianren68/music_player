@@ -2,6 +2,7 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use gpui_component::tooltip::Tooltip;
+use gpui_component::input::{Input, InputState};
 use crate::theme::ThemeConfig;
 use crate::models::Folder;
 
@@ -56,15 +57,20 @@ pub fn build_sidebar(
     loading_folders: &[SharedString],
     t: &ThemeConfig,
     list_height: gpui::Pixels,
+    search_input: &Entity<InputState>,
+    search_query: &str,
     cx: &mut Context<crate::MusicPlayer>,
 ) -> AnyElement {
-    // 搜索栏
+    // 搜索栏（真实输入框，绑定到 search_input 状态）
     let search_bar = div().flex().items_center().gap_2()
-        .px_3().py_2().rounded_lg().mt_3()
+        .px_2().py_1().rounded_lg().mt_3()
         .bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.05 })
         .border_1().border_color(t.border)
-        .child(svg().path("icons/search.svg").size_4().text_color(t.muted_fg))
-        .child(div().text_sm().text_color(t.muted_fg).child("搜索歌曲、歌手..."));
+        .child(Input::new(search_input)
+            .prefix(svg().path("icons/search.svg").size_4().text_color(t.muted_fg))
+            .cleanable(true)
+            .bordered(false)
+            .appearance(false));
 
     // 标签页
     let tabs = div().flex().gap_2().px_1()
@@ -82,8 +88,32 @@ pub fn build_sidebar(
                 .text_color(t.muted_fg).child("专辑")
         );
 
+    // 搜索模式：扁平展示匹配结果；否则保持文件夹分组视图
+    let query = search_query.trim();
+    let is_search = !query.is_empty();
+    let matched: Vec<(usize, usize)> = if is_search {
+        // 大小写不敏感地匹配 歌名 / 歌手 / 专辑
+        let ql: String = query.to_lowercase();
+        let mut v = Vec::new();
+        for (fi, folder) in folders.iter().enumerate() {
+            for (ti, track) in folder.tracks.iter().enumerate() {
+                if track.title.to_lowercase().contains(&ql)
+                    || track.artist.to_lowercase().contains(&ql)
+                    || track.album.to_lowercase().contains(&ql)
+                {
+                    v.push((fi, ti));
+                }
+            }
+        }
+        v
+    } else {
+        Vec::new()
+    };
+
     // 计算总列表项数
-    let total: usize = {
+    let total: usize = if is_search {
+        matched.len()
+    } else {
         let mut count = 0;
         for folder in folders {
             count += 1;
@@ -97,18 +127,24 @@ pub fn build_sidebar(
 
     let has_folders = !folders.is_empty();
     let has_loading = !loading_folders.is_empty();
-    let is_empty = !has_folders && !has_loading;
+    let is_empty = if is_search {
+        matched.is_empty()
+    } else {
+        !has_folders && !has_loading
+    };
 
     // ── 虚拟滚动列表 ──
     let list = if is_empty {
+        let msg = if is_search { "未找到匹配的歌曲" } else { "在设置中添加音乐文件夹" };
         div().text_color(t.muted_fg).text_center().py_12().text_sm()
-            .child("在设置中添加音乐文件夹")
+            .child(msg)
             .into_any()
     } else {
         let t_clone = t.clone();
+        let matched_clone = matched.clone();
 
         uniform_list(
-            "sidebar-virtual-list",
+            if is_search { "sidebar-search-list" } else { "sidebar-virtual-list" },
             total,
             cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                 let phase = this.eq_phase as f32 * 0.6;
@@ -120,7 +156,18 @@ pub fn build_sidebar(
                 // 防抖收集：本轮渲染中需要加载封面的歌曲
                 let mut needs_cover: Vec<(usize, usize, std::path::PathBuf, String)> = Vec::new();
                 for ix in range {
-                    let item = find_list_item(&this.folders, &this.loading_folders, ix);
+                    // 搜索模式：从 matched 取真实 (fi, ti)；否则按文件夹线性索引
+                    let item = if is_search {
+                        matched_clone.get(ix).and_then(|&(fi, ti)| {
+                            if fi < this.folders.len() && ti < this.folders[fi].tracks.len() {
+                                Some(ListItemRef::Track { fi, ti, track: &this.folders[fi].tracks[ti] })
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        find_list_item(&this.folders, &this.loading_folders, ix)
+                    };
                     if let Some(item) = item {
                         // 封面懒加载防抖：歌曲出现在可视区域且没有封面缓存时，加入待处理队列
                         if let ListItemRef::Track { fi, ti, track } = &item {
