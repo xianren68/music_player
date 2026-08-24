@@ -126,7 +126,19 @@ pub fn extract_cover(path: &Path) -> Option<Vec<u8>> {
     }
 }
 
+/// 扫描时用于告警的"疑似音频但不支持"的扩展名。
+/// 仅用于诊断打印，避免把 jpg/txt/log 等普通文件也打出来刷屏。
+const AUDIO_LIKE_EXTENSIONS: &[&str] = &[
+    "opus", "wma", "ape", "m4b", "mid", "midi", "aiff", "aif",
+    "dsf", "tta", "tak", "wv", "alac", "caf", "amr",
+];
+
 /// 扫描文件夹，提取所有音频文件
+///
+/// 诊断日志（stderr）：
+/// - 扩展名命中白名单但 `read_meta` 失败 → 打印，方便定位"少了歌"（文件损坏 / 编码不支持等）
+/// - 扩展名疑似音频但不在支持列表 → 提示需加白名单
+/// - 其它非音频文件（jpg/txt/log 等）不打印，避免刷屏
 pub fn scan_dir(dir: &Path) -> Vec<Track> {
     let mut tracks = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -137,15 +149,24 @@ pub fn scan_dir(dir: &Path) -> Vec<Track> {
                 if p.is_dir() {
                     stack.push(p);
                 } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                    if AUDIO_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
-                        if let Some(t) = read_meta(&p) {
-                            tracks.push(t);
+                    let ext_l = ext.to_lowercase();
+                    if AUDIO_EXTENSIONS.contains(&ext_l.as_str()) {
+                        // 扩展名命中白名单，但元数据读不出会静默丢弃（表现为"少了歌"），
+                        // 这里打印出来方便定位（文件损坏 / 编码不支持等）。
+                        match read_meta(&p) {
+                            Some(t) => tracks.push(t),
+                            None => eprintln!("[扫描] read_meta 失败，已跳过: {}", p.display()),
                         }
+                    } else if AUDIO_LIKE_EXTENSIONS.contains(&ext_l.as_str()) {
+                        // 扩展名像音频但不在支持列表，提示用户需要加白名单
+                        eprintln!("[扫描] 扩展名未支持（疑似音频，已跳过）: {} (.{})", p.display(), ext_l);
                     }
+                    // 其它非音频文件（jpg/txt/log 等）不打印，避免刷屏
                 }
             }
         }
     }
+    eprintln!("[扫描] 完成：命中 {} 首，目录 {}", tracks.len(), dir.display());
     tracks.sort_by(|a, b| a.title.cmp(&b.title));
     tracks
 }
