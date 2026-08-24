@@ -76,15 +76,54 @@ pub fn load_cover_from_cache(cover_path: &str) -> Option<Vec<u8>> {
     std::fs::read(cover_path).ok()
 }
 
-/// 读取音频文件元数据
-pub fn read_meta(path: &Path) -> Option<Track> {
-    let f = Probe::open(path).ok()?.guess_file_type().ok()?.read().ok()?;
-    let dur = f.properties().duration().as_secs_f64();
-    let tag = f.first_tag();
-    let title = tag.and_then(|t| t.get_string(&ItemKey::TrackTitle)).map(|s| s.into())
-        .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or("未知").into());
-    let artist = tag.and_then(|t| t.get_string(&ItemKey::TrackArtist)).map(|s| s.into()).unwrap_or_default();
-    let album = tag.and_then(|t| t.get_string(&ItemKey::AlbumTitle)).map(|s| s.into()).unwrap_or_default();
+/// 读取音频文件元数据。
+///
+/// 设计：扩展名命中白名单的文件**无论如何都加入列表**——lofty 解析整文件失败
+/// （文件损坏 / 编码不支持如部分 ALAC·DRM 的 m4a / 非 PCM 的 wav 等）时不丢弃，
+/// 退化为仅填充 path + 文件名 + 空歌手/专辑 + duration=0 的 Track，照样进扫描结果。
+/// 调用方无需再处理"读不出就跳过"，自然不再有"少了歌"的现象。
+pub fn read_meta(path: &Path) -> Track {
+    // 文件名兜底（扩展名命中白名单但读不出标签时，标题用文件名）
+    let fallback_title = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("未知")
+        .to_string();
+
+    // 尝试用 lofty 完整解析；任何一步失败都退化为"仅文件名"兜底（仍返回 Track）。
+    // 注意：tag 是借用解析结果 f 的引用，必须在 Some 分支内就地解析成 owned 的
+    // String，不能把引用带出 match，否则会悬垂（E0597）。
+    let parsed = Probe::open(path)
+        .ok()
+        .and_then(|p| p.guess_file_type().ok())
+        .and_then(|p| p.read().ok());
+
+    let (dur, title, artist, album): (f64, String, String, String) = match parsed {
+        Some(f) => {
+            let dur = f.properties().duration().as_secs_f64();
+            let tag = f.first_tag();
+            let title = tag
+                .and_then(|t| t.get_string(&ItemKey::TrackTitle))
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| fallback_title.clone());
+            let artist = tag
+                .and_then(|t| t.get_string(&ItemKey::TrackArtist))
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let album = tag
+                .and_then(|t| t.get_string(&ItemKey::AlbumTitle))
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            (dur, title, artist, album)
+        }
+        None => {
+            eprintln!(
+                "[扫描] read_meta 退化兜底（元数据缺失，仍加入列表）: {}",
+                path.display()
+            );
+            (0.0, fallback_title.clone(), String::new(), String::new())
+        }
+    };
 
     // 检查封面缓存是否存在
     let cover_path = {
@@ -96,7 +135,7 @@ pub fn read_meta(path: &Path) -> Option<Track> {
         }
     };
 
-    Some(Track {
+    Track {
         path: path.into(),
         title,
         artist,
@@ -104,7 +143,7 @@ pub fn read_meta(path: &Path) -> Option<Track> {
         duration: dur,
         cover_path,
         cover: None,
-    })
+    }
 }
 
 /// 从音频文件提取专辑封面（原始数据）
@@ -136,7 +175,7 @@ const AUDIO_LIKE_EXTENSIONS: &[&str] = &[
 /// 扫描文件夹，提取所有音频文件
 ///
 /// 诊断日志（stderr）：
-/// - 扩展名命中白名单但 `read_meta` 失败 → 打印，方便定位"少了歌"（文件损坏 / 编码不支持等）
+/// - 扩展名命中白名单但 lofty 解析失败 → 打印"退化兜底"，但**仍加入列表**（字段用文件名/空值填充）
 /// - 扩展名疑似音频但不在支持列表 → 提示需加白名单
 /// - 其它非音频文件（jpg/txt/log 等）不打印，避免刷屏
 pub fn scan_dir(dir: &Path) -> Vec<Track> {
@@ -151,12 +190,9 @@ pub fn scan_dir(dir: &Path) -> Vec<Track> {
                 } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
                     let ext_l = ext.to_lowercase();
                     if AUDIO_EXTENSIONS.contains(&ext_l.as_str()) {
-                        // 扩展名命中白名单，但元数据读不出会静默丢弃（表现为"少了歌"），
-                        // 这里打印出来方便定位（文件损坏 / 编码不支持等）。
-                        match read_meta(&p) {
-                            Some(t) => tracks.push(t),
-                            None => eprintln!("[扫描] read_meta 失败，已跳过: {}", p.display()),
-                        }
+                        // 扩展名命中白名单：尽力读元数据，lofty 解析失败也兜底加入列表
+                        // （标题用文件名、歌手/专辑留空、时长记 0），不会再有"少了歌"。
+                        tracks.push(read_meta(&p));
                     } else if AUDIO_LIKE_EXTENSIONS.contains(&ext_l.as_str()) {
                         // 扩展名像音频但不在支持列表，提示用户需要加白名单
                         eprintln!("[扫描] 扩展名未支持（疑似音频，已跳过）: {} (.{})", p.display(), ext_l);
