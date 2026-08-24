@@ -9,7 +9,7 @@ mod media_session;
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use gpui_component::{slider::*};
+use gpui_component::{slider::*, Root};
 use gpui_component::input::{InputState, InputEvent};
 use theme::ThemeConfig;
 use settings::AppSettings;
@@ -1083,8 +1083,11 @@ fn main() {
                     ))),
                     ..Default::default()
                 },
-                |_window, cx| {
-                    cx.new(|cx| MusicPlayer::new(cx))
+                |window, cx| {
+                    // 主视图必须用 gpui_component::Root 包一层：Input 等控件在渲染时
+                    // 会调用 Root::read，要求窗口根视图是 Root 类型，否则会 unwrap(None) panic。
+                    let main_view = cx.new(|cx| MusicPlayer::new(cx));
+                    cx.new(|cx| Root::new(main_view, window, cx))
                 },
             );
         })
