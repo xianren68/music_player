@@ -10,7 +10,7 @@ mod media_session;
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use gpui_component::{slider::*, Root};
-use gpui_component::input::{InputState, InputEvent};
+use gpui_component::input::{Input, InputState, InputEvent};
 use theme::ThemeConfig;
 use settings::AppSettings;
 use std::sync::Arc;
@@ -84,6 +84,19 @@ struct MusicPlayer {
     search_sub: Option<Subscription>,
     /// 当前搜索关键字（非空时侧边栏切换为扁平搜索结果视图）
     search_query: String,
+    /// 正在编辑元数据的曲目位置 (fi, ti)；None = 未打开编辑弹窗
+    edit_target: Option<(usize, usize)>,
+    /// 编辑弹窗：标题输入框（懒初始化，打开弹窗时预填当前值）
+    edit_title: Option<Entity<InputState>>,
+    /// 编辑弹窗：歌手输入框
+    edit_artist: Option<Entity<InputState>>,
+    /// 编辑弹窗：专辑输入框
+    edit_album: Option<Entity<InputState>>,
+    /// 编辑保存失败的错误信息（显示在弹窗内）
+    edit_error: Option<String>,
+    /// 当前悬停的曲目位置 (fi, ti)：驱动该行 ⋯ 编辑按钮的展开/收起。
+    /// 按钮始终在元素树里（只变宽度/透明度样式，不增删节点，避免 GPUI 绘制状态机 panic）
+    hovered_track: Option<(usize, usize)>,
 }
 
 actions!(music_player, [ToggleSidebar, ToggleSettings, AddFolder, PlayPause, Next, Prev]);
@@ -180,6 +193,12 @@ impl MusicPlayer {
             search_input: None,
             search_sub: None,
             search_query: String::new(),
+            edit_target: None,
+            edit_title: None,
+            edit_artist: None,
+            edit_album: None,
+            edit_error: None,
+            hovered_track: None,
         };
 
         // 创建媒体会话事件通道，并启动监听循环。
@@ -431,6 +450,78 @@ impl MusicPlayer {
             f.expanded = !f.expanded;
             cx.notify();
         }
+    }
+
+    /// 打开"编辑歌曲信息"弹窗，预填当前曲目的标题/歌手/专辑
+    fn open_edit(&mut self, fi: usize, ti: usize, w: &mut Window, cx: &mut Context<Self>) {
+        // 懒初始化三个输入框（InputState::new 需要窗口句柄）
+        if self.edit_title.is_none() {
+            let title = cx.new(|cx2| InputState::new(w, cx2));
+            let artist = cx.new(|cx2| InputState::new(w, cx2));
+            let album = cx.new(|cx2| InputState::new(w, cx2));
+            self.edit_title = Some(title);
+            self.edit_artist = Some(artist);
+            self.edit_album = Some(album);
+        }
+        // 预填当前值
+        if let Some(track) = self.folders.get(fi).and_then(|f| f.tracks.get(ti)) {
+            let t = track.title.clone();
+            let a = track.artist.clone();
+            let al = track.album.clone();
+            if let Some(input) = &self.edit_title {
+                input.update(cx, |state, cx| state.set_value(t, w, cx));
+            }
+            if let Some(input) = &self.edit_artist {
+                input.update(cx, |state, cx| state.set_value(a, w, cx));
+            }
+            if let Some(input) = &self.edit_album {
+                input.update(cx, |state, cx| state.set_value(al, w, cx));
+            }
+        }
+        self.edit_target = Some((fi, ti));
+        self.edit_error = None;
+        cx.notify();
+    }
+
+    /// 关闭编辑弹窗（不保存）
+    fn close_edit(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        self.edit_target = None;
+        self.edit_error = None;
+        cx.notify();
+    }
+
+    /// 保存编辑：写回音频文件标签 → 更新内存 Track → 同步缓存 → 关闭弹窗
+    fn save_edit(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        let Some((fi, ti)) = self.edit_target else { return };
+        let Some(track) = self.folders.get(fi).and_then(|f| f.tracks.get(ti)) else { return };
+        let path = track.path.clone();
+        let title = self.edit_title.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
+        let artist = self.edit_artist.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
+        let album = self.edit_album.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
+
+        // 写回音频文件标签（lofty 主路径 + MP3 的 id3 回退）
+        match crate::audio::write_meta(&path, &title, &artist, &album) {
+            Ok(()) => {
+                // 更新内存中的 Track（列表、搜索索引、播放信息随之刷新）
+                if let Some(track) = self.folders.get_mut(fi).and_then(|f| f.tracks.get_mut(ti)) {
+                    track.title = title;
+                    track.artist = artist;
+                    track.album = album;
+                }
+                // 同步系统媒体会话（如果正在播放这首歌，任务栏卡片也要更新）
+                self.sync_media_session(cx);
+                // 同步 settings.json 缓存，避免重启后显示旧值
+                self.save_settings_for_cache();
+                self.edit_target = None;
+                self.edit_error = None;
+                eprintln!("[编辑] 已保存元数据: {}", path.display());
+            }
+            Err(e) => {
+                eprintln!("[编辑] 保存失败: {}", e);
+                self.edit_error = Some(e);
+            }
+        }
+        cx.notify();
     }
 
     /// 最小化窗口
@@ -839,6 +930,71 @@ impl MusicPlayer {
             }
         }).detach();
     }
+
+    /// 构建"编辑歌曲信息"弹窗：全屏半透明遮罩 + 居中面板（标题/歌手/专辑输入框 + 按钮）
+    fn build_edit_modal(&mut self, _w: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme.clone();
+        // 输入框应已由 open_edit 懒初始化；若缺失（理论上不会）则安全降级为不渲染
+        let Some(title) = self.edit_title.clone() else { return div().into_any_element() };
+        let Some(artist) = self.edit_artist.clone() else { return div().into_any_element() };
+        let Some(album) = self.edit_album.clone() else { return div().into_any_element() };
+        let error = self.edit_error.clone();
+
+        // 字段输入框（复用搜索框同一套 Input 组件）；label 转成 owned String，
+        // 避免 &str 参数在闭包内逃逸（div().child() 要求 'static 元素）
+        let field = |label: String, input: &Entity<InputState>| {
+            div().flex_col().gap_1()
+                .child(div().text_xs().text_color(t.muted_fg).child(label))
+                .child(Input::new(input)
+                    .bordered(true)
+                    .appearance(false)
+                    .px_2().py_1().rounded_md())
+        };
+
+        // 遮罩：点击空白处关闭弹窗（需先 .id() 才有 on_click，见 StatefulInteractiveElement）
+        let overlay = div().id("edit-overlay").absolute().top(px(0.0)).left(px(0.0)).size_full()
+            .bg(Hsla { h: 0.0, s: 0.0, l: 0.0, a: 0.55 })
+            .flex().items_center().justify_center()
+            .on_click(cx.listener(|this, e, w, cx| this.close_edit(e, w, cx)));
+
+        // 错误提示（保存失败时显示，提前构建为 owned String 避免借用逃逸）
+        let error_el = error.map(|e| {
+            div().text_xs().text_color(Hsla { h: 0.0, s: 0.8, l: 0.55, a: 1.0 }).child(e)
+        });
+
+        let mut panel = div().id("edit-panel").w(px(360.0)).rounded_lg().p_4().flex_col().gap_3()
+            .bg(t.surface).border_1().border_color(t.border)
+            // 点击面板内部不冒泡到遮罩（避免误关）
+            .on_click(cx.listener(|_this, _e, _w, cx| cx.stop_propagation()))
+            // 标题行
+            .child(div().text_sm().font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(t.fg).child("编辑歌曲信息"))
+            // 三个字段
+            .child(field("标题".to_string(), &title))
+            .child(field("歌手".to_string(), &artist))
+            .child(field("专辑".to_string(), &album));
+        if let Some(el) = error_el {
+            panel = panel.child(el);
+        }
+        let panel = panel
+            // 按钮行：取消 / 保存
+            .child(div().flex().justify_end().gap_2().pt_1()
+                .child(div().id("edit-cancel").px_3().py_1().rounded_md().text_xs()
+                    .text_color(t.muted_fg).cursor_pointer()
+                    .hover(|style| style.bg(t.hover))
+                    .on_click(cx.listener(|this, e, w, cx| this.close_edit(e, w, cx)))
+                    .child("取消"))
+                .child(div().id("edit-save").px_3().py_1().rounded_md().text_xs()
+                    .text_color(Hsla { h: t.accent.h, s: t.accent.s, l: 0.15, a: 1.0 })
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .bg(t.accent)
+                    .cursor_pointer()
+                    .hover(|style| style.opacity(0.9))
+                    .on_click(cx.listener(|this, e, w, cx| this.save_edit(e, w, cx)))
+                    .child("保存")));
+
+        overlay.child(panel).into_any_element()
+    }
 }
 
 // ── UI 渲染 ──
@@ -887,6 +1043,17 @@ impl Render for MusicPlayer {
         // 计算侧边栏列表可用高度（窗口高度 - topbar - 标题栏 - tabs）
         let window_height = w.viewport_size().height;
         let sidebar_list_height = (window_height - px(200.0)).max(px(200.0));
+
+        // 侧边栏宽度响应式：按窗口宽度的 28% 计算，限制在 [240, 400] 之间。
+        // 窗口拉大时侧边栏跟着变宽，歌名显示区域更多；拉小时最少 240px 不至于太挤。
+        let sidebar_width = (w.viewport_size().width * 0.28)
+            .max(px(240.0))
+            .min(px(400.0));
+
+        // 设置面板宽度响应式：按窗口宽度的 26% 计算，限制在 [260, 360] 之间。
+        let settings_width = (w.viewport_size().width * 0.26)
+            .max(px(260.0))
+            .min(px(360.0));
         
         // ── 搜索输入框懒初始化 ──
         // InputState::new 需要窗口句柄，故推迟到 render 首次拿到 &mut Window 时创建。
@@ -922,6 +1089,7 @@ impl Render for MusicPlayer {
             sidebar_list_height,
             self.search_input.as_ref().unwrap(),
             &self.search_query,
+            sidebar_width,
             cx,
         );
         let topbar = ui::topbar::build_topbar(sidebar_open, settings_open, &t, cx);
@@ -936,6 +1104,7 @@ impl Render for MusicPlayer {
             opacity, opacity_enabled, &self.slider,
             &t, theme_mode,
             &self.bg_slider, self.bg_image_blur,
+            settings_width,
             cx,
         );
 
@@ -1004,7 +1173,14 @@ impl Render for MusicPlayer {
 
         // 根容器
         let root = div().id("root").size_full().relative();
-        root.child(bg_layer).child(content)
+        let root = root.child(bg_layer).child(content);
+
+        // ── 编辑歌曲信息弹窗（模态遮罩 + 面板，绝对定位置于内容之上）──
+        if self.edit_target.is_some() {
+            root.child(self.build_edit_modal(w, cx))
+        } else {
+            root
+        }
     }
 }
 
@@ -1100,8 +1276,10 @@ fn main() {
                     window_background: WindowBackgroundAppearance::Transparent,
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                         point(px(100.0), px(100.0)),
-                        size(px(1000.0), px(650.0)),
+                        size(px(1200.0), px(800.0)),
                     ))),
+                    // 最小窗口尺寸：不允许缩到比初始尺寸还小（防止布局挤压）
+                    window_min_size: Some(size(px(1200.0), px(800.0))),
                     ..Default::default()
                 },
                 |window, cx| {

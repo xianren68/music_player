@@ -17,6 +17,7 @@ pub fn build_settings(
     theme_mode: crate::ThemeMode,
     bg_slider: &Entity<SliderState>,
     bg_blur: bool,
+    settings_width: gpui::Pixels,
     cx: &mut Context<crate::MusicPlayer>,
 ) -> AnyElement {
     let has_bg = t.bg_image.is_some();
@@ -27,7 +28,7 @@ pub fn build_settings(
     let music_folders: Vec<SharedString> = crate::settings::AppSettings::load()
         .music_folders.iter().map(|s| s.clone().into()).collect();
 
-    div().id("settings-panel").flex_none().w(px(300.0)).flex_col()
+    div().id("settings-panel").flex_none().w(settings_width).flex_col()
         .bg(Hsla { h: t.bg.h, s: t.bg.s, l: t.bg.l, a: 0.4 })
         .border_l_1().border_color(t.border)
         .child(

@@ -59,6 +59,7 @@ pub fn build_sidebar(
     list_height: gpui::Pixels,
     search_input: &Entity<InputState>,
     search_query: &str,
+    sidebar_width: gpui::Pixels,
     cx: &mut Context<crate::MusicPlayer>,
 ) -> AnyElement {
     // 搜索栏（真实输入框，绑定到 search_input 状态）
@@ -181,7 +182,7 @@ pub fn build_sidebar(
                             }
                         }
                         items.push(render_list_item(
-                            item, ix, this.current, &t_clone,
+                            item, ix, this.current, this.hovered_track, &t_clone,
                             bar_h1, bar_h2, bar_h3, cx,
                         ));
                     }
@@ -239,7 +240,8 @@ pub fn build_sidebar(
         .into_any()
     };
 
-    div().id("sidebar").flex_none().w(px(280.0)).h_full().flex_col()
+    // 侧边栏宽度随窗口大小响应式（由调用方按窗口宽度算好传入）
+    div().id("sidebar").flex_none().w(sidebar_width).h_full().flex_col()
         .bg(Hsla { h: t.bg.h, s: t.bg.s, l: t.bg.l, a: 0.5 })
         .border_r_1().border_color(t.border)
         // 标题栏
@@ -264,6 +266,7 @@ fn render_list_item(
     item: ListItemRef,
     ix: usize,
     current: Option<(usize, usize)>,
+    hovered_track: Option<(usize, usize)>,
     t: &ThemeConfig,
     bar_h1: f32,
     bar_h2: f32,
@@ -296,6 +299,12 @@ fn render_list_item(
             let dur = crate::audio::fmt_time(track.duration);
             let title_str = track.title.clone();
             let artist_str = track.artist.clone();
+            // 本行是否悬停：由调用方传入的 hovered_track 状态驱动 ⋯ 按钮展开。
+            // （不在渲染函数里 read view 状态——渲染期间 view 已被 &mut 借用，
+            //   read 会触发借用冲突 panic；由 processor 闭包用 this 直接读好传进来）
+            let is_hovered = hovered_track == Some((fi, ti));
+            let btn_w = if is_hovered { px(26.0) } else { px(0.0) };
+            let btn_opacity = if is_hovered { 1.0 } else { 0.0 };
 
             div().id(("t", ix as u64))
                 .w_full()
@@ -305,6 +314,19 @@ fn render_list_item(
                 .when(cur, |this| this.bg(t.active))
                 .hover(|style| style.bg(if cur { t.active } else { t.hover }))
                 .cursor_pointer()
+                // 更新悬停状态（进入/离开本行），驱动 ⋯ 按钮展开/收起。
+                // 离开时只清自己的状态，避免鼠标从 A 移到 B 时 A 的 leave 误清 B
+                .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                    if *hovered {
+                        if this.hovered_track != Some((fi, ti)) {
+                            this.hovered_track = Some((fi, ti));
+                            cx.notify();
+                        }
+                    } else if this.hovered_track == Some((fi, ti)) {
+                        this.hovered_track = None;
+                        cx.notify();
+                    }
+                }))
                 .on_click(cx.listener(move |this, e, w, cx| this.play_at(fi, ti, e, w, cx)))
                 // tooltip 显示完整歌名（只在作者非空时显示 "歌名 - 作者"）
                 .tooltip(move |_window, cx| {
@@ -343,8 +365,27 @@ fn render_list_item(
                         .child(track.title.clone()))
                     .child(div().text_xs().text_ellipsis().whitespace_nowrap()
                         .text_color(t.muted_fg).child(track.artist.clone())))
-                // 时长（固定宽度）
-                .child(div().flex_none().pr_3().text_xs().text_color(t.muted_fg).child(dur))
+                // 时长 + ⋯ 编辑按钮（同一子容器，内部无 gap）：
+                // 按钮常驻 flex 流（元素树不变），由 hovered_track 状态驱动
+                // 宽度 0↔26px + 透明度 0↔1（notify 强制重排，可靠展开/收起）。
+                // 平时不占位（行尾就是时长）；悬停时展开把时长挤到左侧。
+                .child(div().flex().items_center()
+                    .child(div().flex_none().pr_3().text_xs().text_color(t.muted_fg).child(dur))
+                    .child(div().id(("te", ix as u64))
+                        .flex_none().w(btn_w).overflow_hidden()
+                        .h(px(24.0))
+                        .rounded(px(6.0))
+                        .border_1().border_color(t.border)
+                        .bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.04 })
+                        .text_color(t.muted_fg)
+                        .opacity(btn_opacity)
+                        .hover(|style| style.bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.1 }))
+                        .on_click(cx.listener(move |this, _e, w, cx| {
+                            cx.stop_propagation();
+                            this.open_edit(fi, ti, w, cx);
+                        }))
+                        .child(div().flex().items_center().justify_center().size_full()
+                            .child(svg().path("icons/more.svg").size_4().text_color(t.muted_fg)))))
                 .into_any_element()
         }
         ListItemRef::Loading { name } => {
