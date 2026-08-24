@@ -939,6 +939,23 @@ impl Render for MusicPlayer {
             cx,
         );
 
+        // ── 窗口视觉分层总览（透明 / 背景图）──
+        // 从下到上共两层：
+        //   1) bg_layer（绝对定位铺满）：背景图本身，可选再叠一层主题色 0.4 的"磨砂"遮罩。
+        //   2) content（真正的 UI：topbar + body + 设置面板）。
+        // 两个滑块分别控制这两层的"可见度"：
+        //   · 窗口透明度开关 + "不透明度"滑块(opacity, 0.1~1.0)：
+        //       关 → bg_layer 的图 opacity=1.0，content 用不透明 surface 盖住；
+        //       开 → bg_layer 的图 opacity=opacity，无图时 content.bg(surface).opacity(opacity)，
+        //             整个窗口半透明，桌面直接透出来。
+        //   · "背景图透明度"滑块(bg_content_opacity, 0~1.0，仅选了背景图才出现)：
+        //       content 的 surface 背景 alpha = 1.0 - 该值，值越大 content 越透、
+        //       下层的背景图越明显；它只决定"墙纸在面板后露多少"，不会让窗口透到桌面。
+        //   · 磨砂效果开关：在 bg_layer 上叠一层主题色 a:0.4 的 div，做出毛玻璃感。
+        // 关键区分：WindowOptions.window_background=Transparent 是"窗口能否看穿桌面"的前提，
+        // 与背景图无关；背景图是否可见由上面两层叠加结果决定。
+        // 背景图的加载/解码见 pick_bg_image；持久化见 settings.json
+        // (bg_image_path / bg_opacity / bg_blur / opacity / opacity_enabled)。
         // 背景图片层：放最底层
         let has_bg = self.bg_image.is_some();
         let bg_content_opacity = self.bg_slider.read(cx).value().start();
@@ -1076,6 +1093,10 @@ fn main() {
                         appears_transparent: true,
                         traffic_light_position: None,
                     }),
+                    // 窗口级透明：让整个窗口背景透明（Windows layered window 合成），
+                    // 配合 titlebar.appears_transparent，桌面能透过窗口显示。
+                    // 注意：这层只决定"窗口能不能看穿到桌面"，背景图是否可见由下方
+                    // bg_layer/content 两层叠加 + 两个滑块控制，与这里无关。
                     window_background: WindowBackgroundAppearance::Transparent,
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                         point(px(100.0), px(100.0)),
