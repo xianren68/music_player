@@ -24,6 +24,7 @@ pub struct Track {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Folder {
     pub name: String,
+    /// 在「播放列表」视图里是否展开显示其中的歌曲
     pub expanded: bool,
     pub tracks: Vec<Track>,
 }

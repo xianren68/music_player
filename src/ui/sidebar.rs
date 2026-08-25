@@ -5,51 +5,118 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::input::{Input, InputState};
 use crate::theme::ThemeConfig;
 use crate::models::Folder;
+use std::collections::BTreeMap;
 
-/// 列表项的引用（用于在 uniform_list 闭包内渲染）
-enum ListItemRef<'a> {
-    FolderHeader { fi: usize, name: &'a str, count: usize, expanded: bool },
-    Track { fi: usize, ti: usize, track: &'a crate::models::Track },
-    Loading { name: &'a str },
+/// 侧边栏当前展示的列表视图（只保留三个 tab）
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ListView { Playlists, Album, Artist }
+
+/// 分组类型（专辑/歌手分组的内部区分）
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GroupKind { Album, Artist }
+
+/// 扁平化后的列表项：侧边栏虚拟滚动统一用这一个枚举，避免按 tab 分多套渲染路径
+#[derive(Clone)]
+enum FlatItem {
+    FolderHeader { fi: usize, name: String, count: usize, expanded: bool },
+    GroupHeader { kind: GroupKind, key: String, name: String, sub: String, count: usize, expanded: bool },
+    Track { fi: usize, ti: usize },
+    Loading { name: String },
 }
 
-/// 根据 ix 在 folders + loading_folders 中查找对应的列表项
-fn find_list_item<'a>(
-    folders: &'a [Folder],
-    loading_folders: &'a [SharedString],
-    ix: usize,
-) -> Option<ListItemRef<'a>> {
-    let mut idx = 0;
+/// "播放列表"视图：按文件夹分组（文件夹头 + 展开后的歌曲），沿用旧版"全部"的样子
+fn build_flat_playlists(folders: &[Folder]) -> Vec<FlatItem> {
+    let mut items = Vec::new();
     for (fi, folder) in folders.iter().enumerate() {
-        if idx == ix {
-            return Some(ListItemRef::FolderHeader {
-                fi,
-                name: &folder.name,
-                count: folder.tracks.len(),
-                expanded: folder.expanded,
-            });
-        }
-        idx += 1;
+        items.push(FlatItem::FolderHeader {
+            fi,
+            name: folder.name.clone(),
+            count: folder.tracks.len(),
+            expanded: folder.expanded,
+        });
         if folder.expanded {
-            let len = folder.tracks.len();
-            if ix < idx + len {
-                let ti = ix - idx;
-                return Some(ListItemRef::Track { fi, ti, track: &folder.tracks[ti] });
+            for ti in 0..folder.tracks.len() {
+                items.push(FlatItem::Track { fi, ti });
             }
-            idx += len;
         }
     }
-    let loading_idx = ix.saturating_sub(idx);
-    if loading_idx < loading_folders.len() {
-        let path_str = &loading_folders[loading_idx];
-        let dir = std::path::Path::new(path_str.as_ref());
-        let name = dir.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("音乐");
-        Some(ListItemRef::Loading { name })
-    } else {
-        None
+    items
+}
+
+/// 专辑/歌手分组视图：按 key（专辑名/歌手名）聚合，展开后列出组内歌曲。
+/// 用 BTreeMap 让分组名按字典序排列；空分组统一改名为"未知专辑"/"未知歌手"落在一起。
+fn build_flat_group(folders: &[Folder], kind: GroupKind, expanded: &std::collections::HashSet<String>) -> Vec<FlatItem> {
+    let mut map: BTreeMap<String, Vec<(usize, usize, String)>> = BTreeMap::new();
+    for (fi, folder) in folders.iter().enumerate() {
+        for (ti, track) in folder.tracks.iter().enumerate() {
+            let key = match kind {
+                GroupKind::Album => track.album.clone(),
+                GroupKind::Artist => track.artist.clone(),
+            };
+            // 副标题：专辑视图显示组内第一首的歌手；歌手视图留空
+            let sub = match kind {
+                GroupKind::Album => track.artist.clone(),
+                GroupKind::Artist => String::new(),
+            };
+            map.entry(key).or_default().push((fi, ti, sub));
+        }
     }
+    let mut items = Vec::new();
+    for (key, entries) in map {
+        let name = if key.is_empty() {
+            match kind {
+                GroupKind::Album => "未知专辑".to_string(),
+                GroupKind::Artist => "未知歌手".to_string(),
+            }
+        } else {
+            key.clone()
+        };
+        let is_expanded = expanded.contains(&key);
+        let count = entries.len();
+        let sub = entries.first().map(|e| e.2.clone()).unwrap_or_default();
+        items.push(FlatItem::GroupHeader {
+            kind,
+            key,
+            name,
+            sub,
+            count,
+            expanded: is_expanded,
+        });
+        if is_expanded {
+            for (fi, ti, _) in entries {
+                items.push(FlatItem::Track { fi, ti });
+            }
+        }
+    }
+    items
+}
+
+/// 单个标签页按钮（分段控件的一个等宽段；选中态用强调色高亮）
+fn build_tab(
+    id: &'static str,
+    label: &str,
+    tab: ListView,
+    active: bool,
+    t: &ThemeConfig,
+    cx: &mut Context<crate::MusicPlayer>,
+) -> AnyElement {
+    div().id(id)
+        .flex_1().h(px(28.0))
+        .flex().items_center().justify_center()
+        .text_xs().font_weight(gpui::FontWeight::MEDIUM)
+        .cursor_pointer()
+        .rounded_full()
+        .when(active, |this| this
+            .bg(Hsla { h: t.accent.h, s: t.accent.s, l: t.accent.l, a: 0.20 })
+            .text_color(t.fg))
+        .when(!active, |this| this
+            .text_color(t.muted_fg)
+            .hover(|style| style
+                .bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.06 })
+                .text_color(t.fg)))
+        .on_click(cx.listener(move |this, e, w, cx| this.set_tab(tab, e, w, cx)))
+        .child(label.to_string())
+        .into_any_element()
 }
 
 pub fn build_sidebar(
@@ -59,6 +126,9 @@ pub fn build_sidebar(
     list_height: gpui::Pixels,
     search_input: &Entity<InputState>,
     search_query: &str,
+    active_tab: &ListView,
+    expanded_albums: &std::collections::HashSet<String>,
+    expanded_artists: &std::collections::HashSet<String>,
     sidebar_width: gpui::Pixels,
     cx: &mut Context<crate::MusicPlayer>,
 ) -> AnyElement {
@@ -73,23 +143,15 @@ pub fn build_sidebar(
             .bordered(false)
             .appearance(false));
 
-    // 标签页
-    let tabs = div().flex().gap_2().px_1()
-        .child(
-            div().px_3().py_1().rounded_full().text_xs().font_weight(gpui::FontWeight::MEDIUM)
-                .bg(Hsla { h: t.accent.h, s: t.accent.s, l: t.accent.l, a: 0.15 })
-                .text_color(t.fg).child("全部")
-        )
-        .child(
-            div().px_3().py_1().rounded_full().text_xs().font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(t.muted_fg).child("播放列表")
-        )
-        .child(
-            div().px_3().py_1().rounded_full().text_xs().font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(t.muted_fg).child("专辑")
-        );
+    // 标签页：分段控件样式（等宽三段 + 一个圆角轨道），选中态用强调色填充
+    let tabs = div().flex().gap_1().p_1()
+        .rounded_full()
+        .bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.05 })
+        .child(build_tab("tab-playlists", "播放列表", ListView::Playlists, *active_tab == ListView::Playlists, t, cx))
+        .child(build_tab("tab-album", "专辑", ListView::Album, *active_tab == ListView::Album, t, cx))
+        .child(build_tab("tab-artist", "歌手", ListView::Artist, *active_tab == ListView::Artist, t, cx));
 
-    // 搜索模式：扁平展示匹配结果；否则保持文件夹分组视图
+    // 搜索模式：扁平展示匹配结果；否则按当前 tab 构建对应视图
     let query = search_query.trim();
     let is_search = !query.is_empty();
     let matched: Vec<(usize, usize)> = if is_search {
@@ -111,41 +173,52 @@ pub fn build_sidebar(
         Vec::new()
     };
 
-    // 计算总列表项数
-    let total: usize = if is_search {
-        matched.len()
+    // 扁平化列表：搜索用匹配结果；否则按 tab 选择分组方式
+    let mut flat: Vec<FlatItem> = if is_search {
+        matched.iter().map(|&(fi, ti)| FlatItem::Track { fi, ti }).collect()
     } else {
-        let mut count = 0;
-        for folder in folders {
-            count += 1;
-            if folder.expanded {
-                count += folder.tracks.len();
-            }
+        match *active_tab {
+            ListView::Playlists => build_flat_playlists(folders),
+            ListView::Album => build_flat_group(folders, GroupKind::Album, expanded_albums),
+            ListView::Artist => build_flat_group(folders, GroupKind::Artist, expanded_artists),
         }
-        count += loading_folders.len();
-        count
+    };
+    // 非搜索时，把"正在扫描"的文件夹以 Loading 项置顶展示（各视图通用）
+    if !is_search {
+        let mut loading: Vec<FlatItem> = loading_folders.iter().map(|lf| {
+            let dir = std::path::Path::new(lf.as_ref());
+            let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("音乐").to_string();
+            FlatItem::Loading { name }
+        }).collect();
+        loading.extend(flat);
+        flat = loading;
+    }
+    let total = flat.len();
+    let is_empty = flat.is_empty();
+    let empty_msg = if is_search {
+        "未找到匹配的歌曲"
+    } else if folders.is_empty() {
+        "在设置中添加音乐文件夹"
+    } else {
+        "暂无内容"
     };
 
-    let has_folders = !folders.is_empty();
-    let has_loading = !loading_folders.is_empty();
-    let is_empty = if is_search {
-        matched.is_empty()
-    } else {
-        !has_folders && !has_loading
-    };
+    // 列表项行高：卡片 56 + 底部 6px 间距 = 62。
+    // 间距必须做进元素高度（外层容器 62、内层卡片 56），不能用 margin —— uniform_list
+    // 按"索引 × 测量高度"绝对定位，margin 会被忽略导致选中行底色贴在一起。
+    let row_h = px(62.0);
 
     // ── 虚拟滚动列表 ──
     let list = if is_empty {
-        let msg = if is_search { "未找到匹配的歌曲" } else { "在设置中添加音乐文件夹" };
         div().text_color(t.muted_fg).text_center().py_12().text_sm()
-            .child(msg)
+            .child(empty_msg)
             .into_any()
     } else {
         let t_clone = t.clone();
-        let matched_clone = matched.clone();
+        let flat_clone = flat.clone();
 
         uniform_list(
-            if is_search { "sidebar-search-list" } else { "sidebar-virtual-list" },
+            "sidebar-virtual-list",
             total,
             cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
                 let phase = this.eq_phase as f32 * 0.6;
@@ -157,34 +230,32 @@ pub fn build_sidebar(
                 // 防抖收集：本轮渲染中需要加载封面的歌曲
                 let mut needs_cover: Vec<(usize, usize, std::path::PathBuf, String)> = Vec::new();
                 for ix in range {
-                    // 搜索模式：从 matched 取真实 (fi, ti)；否则按文件夹线性索引
-                    let item = if is_search {
-                        matched_clone.get(ix).and_then(|&(fi, ti)| {
-                            if fi < this.folders.len() && ti < this.folders[fi].tracks.len() {
-                                Some(ListItemRef::Track { fi, ti, track: &this.folders[fi].tracks[ti] })
-                            } else {
-                                None
-                            }
-                        })
-                    } else {
-                        find_list_item(&this.folders, &this.loading_folders, ix)
-                    };
+                    let item = flat_clone.get(ix).cloned();
                     if let Some(item) = item {
                         // 封面懒加载防抖：歌曲出现在可视区域且没有封面缓存时，加入待处理队列
-                        if let ListItemRef::Track { fi, ti, track } = &item {
-                            if track.cover_path.is_none() {
-                                let key = track.path.to_string_lossy().to_string();
-                                let in_pending = this.pending_cover_loads.iter()
-                                    .any(|(_, _, _, k)| k == &key);
-                                if !this.loading_covers.contains(&key) && !in_pending {
-                                    needs_cover.push((*fi, *ti, track.path.clone(), key));
+                        if let FlatItem::Track { fi, ti } = &item {
+                            if let Some(track) = this.folders.get(*fi).and_then(|f| f.tracks.get(*ti)) {
+                                if track.cover_path.is_none() {
+                                    let key = track.path.to_string_lossy().to_string();
+                                    let in_pending = this.pending_cover_loads.iter()
+                                        .any(|(_, _, _, k)| k == &key);
+                                    if !this.loading_covers.contains(&key) && !in_pending {
+                                        needs_cover.push((*fi, *ti, track.path.clone(), key));
+                                    }
                                 }
                             }
                         }
-                        items.push(render_list_item(
-                            item, ix, this.current, this.hovered_track, &t_clone,
+                        // 渲染卡片（h=56），再用 62 高的外壳包一层 → 底部 6px 实打实的间距
+                        let card = render_list_item(
+                            item, ix, &this.folders, this.current, this.hovered_track, &t_clone,
                             bar_h1, bar_h2, bar_h3, cx,
-                        ));
+                        );
+                        items.push(
+                            div().id(("row", ix as u64))
+                                .w_full().h(row_h).flex().flex_col()
+                                .child(card)
+                                .into_any_element(),
+                        );
                     }
                 }
 
@@ -252,19 +323,20 @@ pub fn build_sidebar(
                     .child(div().text_lg().font_weight(gpui::FontWeight::BOLD).text_color(t.fg).child("音乐库")))
                 .child(search_bar)
         )
-        // 标签页
+        // 标签页（分段控件）
         .child(div().px_3().pb_2().child(tabs))
-        // 歌曲列表（虚拟滚动）— 和旧版一样：容器有 px_3 pb_3
+        // 歌曲列表（虚拟滚动）— 容器有 px_3 pb_3
         .child(div().id("sidebar-list").flex_1().min_h_0().overflow_hidden()
             .px_3().pb_3()
             .child(list))
         .into_any()
 }
 
-/// 渲染单个列表项（完全按照旧版样式）
+/// 渲染单个列表项（卡片本体，高 56；间距由调用方用 62 外壳包出）
 fn render_list_item(
-    item: ListItemRef,
+    item: FlatItem,
     ix: usize,
+    folders: &[Folder],
     current: Option<(usize, usize)>,
     hovered_track: Option<(usize, usize)>,
     t: &ThemeConfig,
@@ -274,11 +346,10 @@ fn render_list_item(
     cx: &mut Context<crate::MusicPlayer>,
 ) -> AnyElement {
     match item {
-        ListItemRef::FolderHeader { fi, name, count, expanded } => {
+        FlatItem::FolderHeader { fi, name, count, expanded } => {
             let fidx = fi;
             div().id(("fh", ix as u64))
-                .w_full()
-                .h(px(56.0))  // 统一高度：和歌曲项一样
+                .w_full().h(px(56.0))
                 .flex().items_center().justify_between()
                 .px_3().rounded_md()
                 .hover(|style| style.bg(t.hover))
@@ -294,7 +365,53 @@ fn render_list_item(
                     .child(format!("{}", count)))
                 .into_any_element()
         }
-        ListItemRef::Track { fi, ti, track } => {
+        FlatItem::GroupHeader { kind, key, name, sub, count, expanded } => {
+            div().id(("gh", ix as u64))
+                .w_full().h(px(56.0))
+                .flex().items_center().justify_between()
+                .px_3().rounded_md()
+                // 已展开的分组用淡强调色底，表示"当前打开/选中"
+                .when(expanded, |this| this.bg(Hsla { h: t.accent.h, s: t.accent.s, l: t.accent.l, a: 0.10 }))
+                .hover(|style| style.bg(t.hover))
+                .cursor_pointer()
+                // 点击展开/收起该分组（各自维护展开集合，切回 tab 后仍保持）
+                .on_click(cx.listener(move |this, _e, _w, cx| {
+                    match kind {
+                        GroupKind::Album => {
+                            if this.expanded_albums.contains(&key) {
+                                this.expanded_albums.remove(&key);
+                            } else {
+                                this.expanded_albums.insert(key.clone());
+                            }
+                        }
+                        GroupKind::Artist => {
+                            if this.expanded_artists.contains(&key) {
+                                this.expanded_artists.remove(&key);
+                            } else {
+                                this.expanded_artists.insert(key.clone());
+                            }
+                        }
+                    }
+                    cx.notify();
+                }))
+                .child(div().flex().items_center().gap_2()
+                    .child(div().text_color(if expanded { t.accent_light } else { t.muted_fg }).text_xs()
+                        .child(if expanded { "▼" } else { "▶" }))
+                    .child(div().flex_col().gap(px(1.0))
+                        .child(div().text_color(t.fg).text_sm()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(name.to_string()))
+                        .when(!sub.is_empty(), |this| this
+                            .child(div().text_color(t.muted_fg).text_xs().child(sub.to_string())))))
+                .child(div().text_color(t.muted_fg).text_xs()
+                    .child(format!("{}", count)))
+                .into_any_element()
+        }
+        FlatItem::Track { fi, ti } => {
+            let track = match folders.get(fi).and_then(|f| f.tracks.get(ti)) {
+                Some(t) => t,
+                None => return div().into_any_element(),
+            };
             let cur = current == Some((fi, ti));
             let dur = crate::audio::fmt_time(track.duration);
             let title_str = track.title.clone();
@@ -307,10 +424,9 @@ fn render_list_item(
             let btn_opacity = if is_hovered { 1.0 } else { 0.0 };
 
             div().id(("t", ix as u64))
-                .w_full()
                 .h(px(56.0))
                 .flex().items_center().gap_3()
-                .ml_2().px_3().rounded_md()
+                .ml_2().mr_2().px_3().rounded_md()
                 .when(cur, |this| this.bg(t.active))
                 .hover(|style| style.bg(if cur { t.active } else { t.hover }))
                 .cursor_pointer()
@@ -388,10 +504,9 @@ fn render_list_item(
                             .child(svg().path("icons/more.svg").size_4().text_color(t.muted_fg)))))
                 .into_any_element()
         }
-        ListItemRef::Loading { name } => {
+        FlatItem::Loading { name } => {
             div().id(("loading", ix as u64))
-                .w_full()
-                .h(px(56.0))  // 统一高度
+                .w_full().h(px(56.0))
                 .flex().items_center().justify_between()
                 .px_3().rounded_md()
                 .child(div().flex().items_center().gap_2()

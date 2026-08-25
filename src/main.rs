@@ -15,12 +15,14 @@ use theme::ThemeConfig;
 use settings::AppSettings;
 use std::sync::Arc;
 use std::sync::{Mutex, mpsc::{channel, Sender}};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use souvlaki::MediaControlEvent;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use models::Folder;
 use audio::Player;
+use crate::ui::sidebar::ListView;
 
 /// 主题模式
 #[derive(Clone, PartialEq)]
@@ -97,6 +99,12 @@ struct MusicPlayer {
     /// 当前悬停的曲目位置 (fi, ti)：驱动该行 ⋯ 编辑按钮的展开/收起。
     /// 按钮始终在元素树里（只变宽度/透明度样式，不增删节点，避免 GPUI 绘制状态机 panic）
     hovered_track: Option<(usize, usize)>,
+    /// 侧边栏当前展示的列表视图（全部 / 播放列表 / 专辑 / 歌手）
+    active_tab: ListView,
+    /// 专辑视图中已展开的分组 key 集合（key = 专辑名，空串代表"未知专辑"）
+    expanded_albums: HashSet<String>,
+    /// 歌手视图中已展开的分组 key 集合（key = 歌手名，空串代表"未知歌手"）
+    expanded_artists: HashSet<String>,
 }
 
 actions!(music_player, [ToggleSidebar, ToggleSettings, AddFolder, PlayPause, Next, Prev]);
@@ -199,6 +207,9 @@ impl MusicPlayer {
             edit_album: None,
             edit_error: None,
             hovered_track: None,
+            active_tab: ListView::Playlists,
+            expanded_albums: HashSet::new(),
+            expanded_artists: HashSet::new(),
         };
 
         // 创建媒体会话事件通道，并启动监听循环。
@@ -445,9 +456,18 @@ impl MusicPlayer {
         cx.notify();
     }
 
+    /// 「播放列表」视图里展开/收起某个文件夹
     fn toggle_folder(&mut self, fi: usize, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
         if let Some(f) = self.folders.get_mut(fi) {
             f.expanded = !f.expanded;
+            cx.notify();
+        }
+    }
+
+    /// 切换侧边栏列表视图（播放列表 / 专辑 / 歌手）
+    fn set_tab(&mut self, tab: ListView, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab != tab {
+            self.active_tab = tab;
             cx.notify();
         }
     }
@@ -1089,6 +1109,9 @@ impl Render for MusicPlayer {
             sidebar_list_height,
             self.search_input.as_ref().unwrap(),
             &self.search_query,
+            &self.active_tab,
+            &self.expanded_albums,
+            &self.expanded_artists,
             sidebar_width,
             cx,
         );
