@@ -381,6 +381,10 @@ impl RodioPlayer {
         self.volume = v;
         self.sink.set_volume(v as f32);
     }
+    /// 跳转到指定秒数（rodio 0.20 起 Sink 支持 try_seek）
+    fn seek(&mut self, secs: f64) {
+        let _ = self.sink.try_seek(std::time::Duration::from_secs_f64(secs.max(0.0)));
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -406,6 +410,15 @@ mod imp {
         pub fn stop(&mut self) {
             self.inner.stop();
         }
+        /// 设置音量（0.0 ~ 1.0）
+        pub fn set_volume(&mut self, v: f64) {
+            self.volume = v;
+            self.inner.set_volume(v);
+        }
+        /// 跳转到指定秒数
+        pub fn seek(&mut self, secs: f64) {
+            self.inner.seek(secs);
+        }
     }
 }
 
@@ -416,6 +429,8 @@ mod imp {
     use windows::Media::Core::MediaSource;
     use windows::Storage;
     use windows::core::HSTRING;
+    // WinRT 的时间跨度以 100ns 为单位（SetPosition 用）
+    use windows::Foundation::TimeSpan;
 
     pub struct Player {
         /// WinRT MediaPlayer（MP3/FLAC/WAV/AAC/M4A 等走这里，自带 Media 类别音频会话）
@@ -508,6 +523,33 @@ mod imp {
             }
             if let Some(r) = &mut self.rodio {
                 r.stop();
+            }
+        }
+
+        /// 设置音量（0.0 ~ 1.0）。记住值，之后换歌时新后端也沿用。
+        pub fn set_volume(&mut self, v: f64) {
+            self.volume = v.clamp(0.0, 1.0);
+            if let Some(mp) = &self.media {
+                let _ = mp.SetVolume(self.volume);
+            }
+            if let Some(r) = &mut self.rodio {
+                r.set_volume(self.volume);
+            }
+        }
+
+        /// 跳转到指定秒数。rodio 后端和 MediaPlayer 后端各走各的 API。
+        pub fn seek(&mut self, secs: f64) {
+            let secs = secs.max(0.0);
+            if self.using_rodio {
+                if let Some(r) = &mut self.rodio {
+                    r.seek(secs);
+                }
+            } else if let Some(mp) = &self.media {
+                // MediaPlaybackSession::SetPosition 接收 100ns 单位的 TimeSpan
+                if let Ok(session) = mp.PlaybackSession() {
+                    let ts = TimeSpan { Duration: (secs * 10_000_000.0) as i64 };
+                    let _ = session.SetPosition(ts);
+                }
             }
         }
     }

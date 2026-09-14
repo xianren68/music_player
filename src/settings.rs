@@ -29,6 +29,25 @@ pub struct AppSettings {
     /// 缓存的歌曲列表（避免每次启动都重新扫描）
     #[serde(default)]
     pub cached_folders: Vec<Folder>,
+    /// 随机播放是否开启
+    #[serde(default)]
+    pub shuffle: bool,
+    /// 循环模式: "off" / "all" / "one"
+    #[serde(default = "default_repeat")]
+    pub repeat: String,
+    /// 音量 (0.0 ~ 1.0)
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+}
+
+/// 老配置文件没有 repeat 字段时的默认值
+fn default_repeat() -> String {
+    "off".into()
+}
+
+/// 老配置文件没有 volume 字段时的默认值（和 Player 内部默认 0.5 保持一致）
+fn default_volume() -> f32 {
+    0.5
 }
 
 impl Default for AppSettings {
@@ -44,6 +63,9 @@ impl Default for AppSettings {
             settings_open: false,
             music_folders: Vec::new(),
             cached_folders: Vec::new(),
+            shuffle: false,
+            repeat: default_repeat(),
+            volume: default_volume(),
         }
     }
 }

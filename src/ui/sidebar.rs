@@ -1,15 +1,19 @@
 // ─── 侧边栏模块 ───
 use gpui::*;
 use gpui::prelude::FluentBuilder;
+// overflow_y_scroll（封面墙滚动）来自 StatefulInteractiveElement
+use gpui::prelude::StatefulInteractiveElement;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::input::{Input, InputState};
 use crate::theme::ThemeConfig;
 use crate::models::Folder;
 use std::collections::BTreeMap;
 
-/// 侧边栏当前展示的列表视图（只保留三个 tab）
+/// 侧边栏当前展示的列表视图
+/// Recent = 最近播放（第三组新增；数据来自 MusicPlayer.recent，按播放时间倒序）
+/// 专辑 tab 另有"列表 / 封面墙"两种呈现方式，由 MusicPlayer.album_grid 控制（见 build_cover_wall）
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ListView { Playlists, Album, Artist }
+pub enum ListView { Playlists, Album, Artist, Recent }
 
 /// 分组类型（专辑/歌手分组的内部区分）
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -129,6 +133,8 @@ pub fn build_sidebar(
     active_tab: &ListView,
     expanded_albums: &std::collections::HashSet<String>,
     expanded_artists: &std::collections::HashSet<String>,
+    recent: &[(usize, usize)],
+    album_grid: bool,
     sidebar_width: gpui::Pixels,
     cx: &mut Context<crate::MusicPlayer>,
 ) -> AnyElement {
@@ -143,13 +149,15 @@ pub fn build_sidebar(
             .bordered(false)
             .appearance(false));
 
-    // 标签页：分段控件样式（等宽三段 + 一个圆角轨道），选中态用强调色填充
+    // 标签页：分段控件样式（等宽四段 + 一个圆角轨道），选中态用强调色填充。
+    // 分成四段后每段变窄，所以第一段文案从"播放列表"缩成"列表"，避免 240px 窄窗下换行。
     let tabs = div().flex().gap_1().p_1()
         .rounded_full()
         .bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.05 })
-        .child(build_tab("tab-playlists", "播放列表", ListView::Playlists, *active_tab == ListView::Playlists, t, cx))
+        .child(build_tab("tab-playlists", "列表", ListView::Playlists, *active_tab == ListView::Playlists, t, cx))
         .child(build_tab("tab-album", "专辑", ListView::Album, *active_tab == ListView::Album, t, cx))
-        .child(build_tab("tab-artist", "歌手", ListView::Artist, *active_tab == ListView::Artist, t, cx));
+        .child(build_tab("tab-artist", "歌手", ListView::Artist, *active_tab == ListView::Artist, t, cx))
+        .child(build_tab("tab-recent", "最近", ListView::Recent, *active_tab == ListView::Recent, t, cx));
 
     // 搜索模式：扁平展示匹配结果；否则按当前 tab 构建对应视图
     let query = search_query.trim();
@@ -181,6 +189,11 @@ pub fn build_sidebar(
             ListView::Playlists => build_flat_playlists(folders),
             ListView::Album => build_flat_group(folders, GroupKind::Album, expanded_albums),
             ListView::Artist => build_flat_group(folders, GroupKind::Artist, expanded_artists),
+            // 最近播放：直接把播放历史映射成扁平歌曲行（越界项直接丢弃，防止库变化后索引失效）
+            ListView::Recent => recent.iter()
+                .filter(|&&(fi, ti)| fi < folders.len() && ti < folders[fi].tracks.len())
+                .map(|&(fi, ti)| FlatItem::Track { fi, ti })
+                .collect(),
         }
     };
     // 非搜索时，把"正在扫描"的文件夹以 Loading 项置顶展示（各视图通用）
@@ -199,6 +212,8 @@ pub fn build_sidebar(
         "未找到匹配的歌曲"
     } else if folders.is_empty() {
         "在设置中添加音乐文件夹"
+    } else if *active_tab == ListView::Recent {
+        "还没有播放记录"
     } else {
         "暂无内容"
     };
@@ -208,8 +223,13 @@ pub fn build_sidebar(
     // 按"索引 × 测量高度"绝对定位，margin 会被忽略导致选中行底色贴在一起。
     let row_h = px(62.0);
 
+    // 封面墙模式：专辑 tab + 切到网格 + 非搜索时生效（走普通 flex 网格，不用虚拟滚动）
+    let grid_mode = !is_search && *active_tab == ListView::Album && album_grid;
+
     // ── 虚拟滚动列表 ──
-    let list = if is_empty {
+    let list = if grid_mode {
+        build_cover_wall(folders, t, sidebar_width, cx)
+    } else if is_empty {
         div().text_color(t.muted_fg).text_center().py_12().text_sm()
             .child(empty_msg)
             .into_any()
@@ -325,12 +345,126 @@ pub fn build_sidebar(
         )
         // 标签页（分段控件）
         .child(div().px_3().pb_2().child(tabs))
-        // 歌曲列表（虚拟滚动）— 容器有 px_3 pb_3
-        .child(div().id("sidebar-list").flex_1().min_h_0().overflow_hidden()
-            .px_3().pb_3()
+        // 专辑工具栏：只在专辑 tab 出现，右侧两个小按钮切换「列表 / 封面墙」
+        .when(!is_search && *active_tab == ListView::Album, |this| this.child(album_toolbar(t, album_grid, cx)))
+        // 歌曲列表（虚拟滚动 / 封面墙）— 容器有 px_3 pb_3
+        // 封面墙是普通 flex 网格，超高时由容器负责滚动；虚拟滚动列表则固定高度、内部自己滚。
+        .child(div().id("sidebar-list").flex_1().min_h_0().px_3().pb_3()
+            .when(grid_mode, |this| this.overflow_y_scroll())
+            .when(!grid_mode, |this| this.overflow_hidden())
             .child(list))
         .into_any()
 }
+
+/// 专辑工具栏：左边显示"共 N 张专辑"，右边是列表/网格两个视图切换按钮。
+/// 纯 UI 部分全部在这里，只依赖 MusicPlayer.album_grid 一个布尔状态。
+fn album_toolbar(
+    t: &ThemeConfig,
+    album_grid: bool,
+    cx: &mut Context<crate::MusicPlayer>,
+) -> AnyElement {
+    // 两个按钮共用同一套样式，只有图标和选中态不同
+    let btn = |id: &'static str, icon: &'static str, active: bool, grid: bool, t: &ThemeConfig, cx: &mut Context<crate::MusicPlayer>| {
+        div().id(id).w(px(24.0)).h(px(24.0)).rounded_md()
+            .flex().items_center().justify_center()
+            .cursor_pointer()
+            .when(active, |this| this.bg(Hsla { h: t.accent.h, s: t.accent.s, l: t.accent.l, a: 0.18 }))
+            .hover(|style| style.bg(Hsla { h: 0.0, s: 0.0, l: 1.0, a: 0.08 }))
+            .on_click(cx.listener(move |this, _e, _w, cx| {
+                if this.album_grid != grid {
+                    this.album_grid = grid;
+                    cx.notify();
+                }
+            }))
+            .child(svg().path(icon).size_3_5()
+                .text_color(if active { t.accent_light } else { t.muted_fg }))
+            .into_any_element()
+    };
+
+    div().px_4().pb_2().flex().items_center().justify_between()
+        .child(div().text_xs().text_color(t.muted_fg).child("按专辑分组"))
+        .child(
+            div().flex().items_center().gap_1()
+                .child(btn("album-view-list", "icons/rows.svg", !album_grid, false, t, cx))
+                .child(btn("album-view-grid", "icons/grid.svg", album_grid, true, t, cx))
+        )
+        .into_any()
+}
+
+/// 专辑封面墙：把库里的专辑按名字聚合成方块网格（默认 2 列，侧边栏够宽时 3 列）。
+/// 每格：方形封面（有封面图就显示真图，没有就用 ♪ 占位）+ 专辑名 + 曲目数。
+/// 点击某一格 = 切回列表视图并展开这张专辑（方便看曲目），切回后由列表负责后续交互。
+fn build_cover_wall(
+    folders: &[Folder],
+    t: &ThemeConfig,
+    sidebar_width: gpui::Pixels,
+    cx: &mut Context<crate::MusicPlayer>,
+) -> AnyElement {
+    // 聚合专辑：key = 专辑名，value = (曲目数, 第一张可用封面路径)
+    let mut map: BTreeMap<String, (usize, Option<std::path::PathBuf>)> = BTreeMap::new();
+    for folder in folders.iter() {
+        for track in folder.tracks.iter() {
+            let entry = map.entry(track.album.clone()).or_insert((0, None));
+            entry.0 += 1;
+            if entry.1.is_none() {
+                if let Some(cp) = &track.cover_path {
+                    // cover_path 是 String，统一存 PathBuf 方便后续接封面缓存
+                    entry.1 = Some(std::path::PathBuf::from(cp));
+                }
+            }
+        }
+    }
+    if map.is_empty() {
+        return div().text_color(t.muted_fg).text_center().py_12().text_sm()
+            .child("暂无专辑").into_any();
+    }
+
+    // 列数按侧边栏宽度定：240~300 用 2 列，更宽用 3 列
+    let inner_w = f32::from(sidebar_width) - 24.0; // 侧边栏左右各 12px 内边距
+    let cols: usize = if inner_w >= 330.0 { 3 } else { 2 };
+    let gap = 12.0_f32;
+    let cell_w = ((inner_w - gap * (cols as f32 - 1.0)) / cols as f32).max(60.0);
+
+    let cards: Vec<AnyElement> = map.into_iter().map(|(key, (count, _cover))| {
+        // 封面占位块：本轮只做 UI，暂不解码真图 —— 网格每次重绘都会跑（进度定时器 500ms
+        // 一次 cx.notify），逐帧解 PNG 会直接卡住 UI；接功能时再配一个封面缓存（path → RenderImage）
+        // 只在首次解码，这里预留了 cover 字段。
+        let art = div().w(px(cell_w)).h(px(cell_w)).rounded_lg().overflow_hidden()
+            .bg(Hsla { h: t.accent.h, s: t.accent.s, l: t.accent.l, a: 0.10 })
+            .flex().items_center().justify_center()
+            .child(svg().path("icons/music.svg")
+                .size(px(cell_w * 0.34)).text_color(t.accent_light));
+
+        let album_name = if key.is_empty() { "未知专辑".to_string() } else { key.clone() };
+        let key_for_click = key.clone();
+
+        div().id(SharedString::from(format!("wall-{}", key)))
+            .w(px(cell_w)).flex_col().gap_2()
+            .cursor_pointer()
+            // 点击：切回列表视图并展开这张专辑
+            .on_click(cx.listener(move |this, _e, _w, cx| {
+                this.album_grid = false;
+                this.active_tab = ListView::Album;
+                this.expanded_albums.insert(key_for_click.clone());
+                cx.notify();
+            }))
+            .child(art)
+            .child(
+                div().flex_col()
+                    .child(div().text_xs().font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(t.fg).whitespace_nowrap().overflow_hidden().text_ellipsis()
+                        .child(album_name))
+                    .child(div().text_xs().text_color(t.muted_fg).child(format!("{} 首", count)))
+            )
+            .into_any()
+    }).collect();
+
+    div().id("cover-wall")
+        .flex().flex_wrap().gap(px(gap))
+        .children(cards)
+        .into_any()
+}
+
 
 /// 渲染单个列表项（卡片本体，高 56；间距由调用方用 62 外壳包出）
 fn render_list_item(

@@ -6,6 +6,8 @@ mod theme;
 mod settings;
 mod lyrics;
 mod media_session;
+mod platform;
+mod tray;
 
 use gpui::*;
 use gpui::prelude::FluentBuilder;
@@ -19,6 +21,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use souvlaki::MediaControlEvent;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use tray::TrayEvent;
 
 use models::Folder;
 use audio::Player;
@@ -27,6 +30,37 @@ use crate::ui::sidebar::ListView;
 /// 主题模式
 #[derive(Clone, PartialEq)]
 enum ThemeMode { Dark, Light }
+
+/// 循环播放模式：顺序播放 / 列表循环 / 单曲循环
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RepeatMode { Off, All, One }
+
+impl RepeatMode {
+    /// 持久化用的字符串
+    fn as_str(self) -> &'static str {
+        match self {
+            RepeatMode::Off => "off",
+            RepeatMode::All => "all",
+            RepeatMode::One => "one",
+        }
+    }
+    /// 从持久化字符串还原（非法值回退为顺序播放）
+    fn from_str(s: &str) -> Self {
+        match s {
+            "all" => RepeatMode::All,
+            "one" => RepeatMode::One,
+            _ => RepeatMode::Off,
+        }
+    }
+    /// 设置面板里显示的文案
+    pub fn label(self) -> &'static str {
+        match self {
+            RepeatMode::Off => "顺序播放",
+            RepeatMode::All => "列表循环",
+            RepeatMode::One => "单曲循环",
+        }
+    }
+}
 
 /// 应用主结构
 struct MusicPlayer {
@@ -46,6 +80,9 @@ struct MusicPlayer {
     /// 背景图透明度滑块
     bg_slider: Entity<SliderState>,
     _bg_sub: Subscription,
+    /// 音量滑块（设置面板「播放」分组）
+    volume_slider: Entity<SliderState>,
+    _volume_sub: Subscription,
     /// 当前主题配置
     theme: ThemeConfig,
     /// 主题模式
@@ -105,6 +142,31 @@ struct MusicPlayer {
     expanded_albums: HashSet<String>,
     /// 歌手视图中已展开的分组 key 集合（key = 歌手名，空串代表"未知歌手"）
     expanded_artists: HashSet<String>,
+    /// 随机播放是否开启
+    shuffle: bool,
+    /// 循环模式（顺序 / 列表循环 / 单曲循环）
+    repeat: RepeatMode,
+    /// 音量 (0.0 ~ 1.0)
+    volume: f64,
+    /// 进度更新定时器是否已启动：整个应用只跑一个循环即可，
+    /// 否则每 play 一次就多一个 500ms 定时器（旧实现的问题）
+    progress_timer_started: bool,
+    /// 播放队列面板是否展开（第三组 UI）
+    queue_open: bool,
+    /// 最近播放历史（第三组 UI）：play() 时把曲目推到最前，去重、上限 50 条
+    recent: Vec<(usize, usize)>,
+    /// 专辑 tab 是否用封面墙（网格）而不是列表（第三组 UI）
+    album_grid: bool,
+    /// 歌词字号档位 -1~2（第三组 UI：只影响显示）
+    lyric_font_step: i32,
+    /// 歌词是否居中显示（第三组 UI：关掉则左对齐）
+    lyric_centered: bool,
+    /// 迷你播放器模式（第四组：紧凑单行布局 + 窗口缩小）
+    mini_mode: bool,
+    /// 进迷你模式前的窗口尺寸，退出时还原
+    normal_size: Option<Size<Pixels>>,
+    /// 文件关联注册结果提示（显示在设置面板）
+    assoc_msg: Option<String>,
 }
 
 actions!(music_player, [ToggleSidebar, ToggleSettings, AddFolder, PlayPause, Next, Prev]);
@@ -137,6 +199,19 @@ impl MusicPlayer {
 
         let bg_sub = cx.subscribe(&bg_slider, move |_, _, _event: &SliderEvent, cx| {
             cx.notify();
+        });
+
+        // 音量滑块：拖动即应用到播放后端并持久化
+        let volume_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(1.0)
+                .step(0.01)
+                .default_value(saved.volume)
+        });
+
+        let volume_sub = cx.subscribe(&volume_slider, move |this, _, _event: &SliderEvent, cx| {
+            this.on_volume_change(cx);
         });
 
         // 根据保存的主题模式加载主题
@@ -181,6 +256,8 @@ impl MusicPlayer {
             _subscription: subscription,
             bg_slider,
             _bg_sub: bg_sub,
+            volume_slider,
+            _volume_sub: volume_sub,
             theme,
             theme_mode,
             bg_image_path: saved.bg_image_path.map(|s| s.into()),
@@ -210,7 +287,25 @@ impl MusicPlayer {
             active_tab: ListView::Playlists,
             expanded_albums: HashSet::new(),
             expanded_artists: HashSet::new(),
+            // 随机/循环/音量从设置里恢复
+            shuffle: saved.shuffle,
+            repeat: RepeatMode::from_str(&saved.repeat),
+            volume: saved.volume as f64,
+            progress_timer_started: false,
+            // 第三组 UI 的初始状态
+            queue_open: false,
+            recent: Vec::new(),
+            album_grid: false,
+            lyric_font_step: 0,
+            lyric_centered: true,
+            // 第四组
+            mini_mode: false,
+            normal_size: None,
+            assoc_msg: None,
         };
+
+        // 把恢复的音量应用到播放后端
+        this.player.set_volume(this.volume);
 
         // 创建媒体会话事件通道，并启动监听循环。
         // 注意：Windows 上 SMTC 需要有效的窗口句柄(hwnd)才能显示，
@@ -243,7 +338,132 @@ impl MusicPlayer {
         // 清理旧版封面缓存文件（不带 v2_ 前缀的 80x80 低分辨率版本）
         crate::audio::cleanup_old_covers();
         this.load_music_folder(cx);
+
+        // ── 系统托盘（第四组）──
+        // start_tray 会在后台线程挂图标，这里只负责把托盘事件搬回主线程处理。
+        if let Some(rx) = crate::tray::start_tray() {
+            let rx = Arc::new(Mutex::new(rx));
+            let rx2 = rx.clone();
+            cx.spawn(async move |this, cx| {
+                loop {
+                    // 在后台线程阻塞等待，避免占用 GPUI 主执行器
+                    let evt = cx.background_spawn({
+                        let rx = rx2.clone();
+                        async move { rx.lock().unwrap().recv().ok() }
+                    }).await;
+                    match evt {
+                        Some(TrayEvent::Quit) => {
+                            this.update(cx, |_this, cx| cx.quit()).ok();
+                            break;
+                        }
+                        Some(evt) => {
+                            this.update(cx, |this, cx| this.handle_tray_event(evt, cx)).ok();
+                        }
+                        None => break, // 托盘线程退出
+                    }
+                }
+            }).detach();
+        }
+
+        // ── 第二个实例送来的"要打开的文件"轮询（第四组 单实例 + 文件关联）──
+        // 用每秒一次的轮询（而不是 IPC）：第二个实例把文件路径写进 %TEMP% 的一个文本文件，
+        // 这里读到就播、并立刻删掉请求文件。第一次轮询要等 1s，正好避开启动扫描。
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_spawn(async {
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                }).await;
+                let pending = cx.background_spawn(async {
+                    crate::tray::take_pending_file()
+                }).await;
+                if let Some(path) = pending {
+                    this.update(cx, |this, cx| this.open_external_file(path, cx)).ok();
+                }
+                // 页面/视图被丢弃后 this.update 会失败，借此退出循环
+                if this.update(cx, |_, _| {}).is_err() {
+                    break;
+                }
+            }
+        }).detach();
+
         this
+    }
+
+    /// 托盘菜单事件 → 播放器动作
+    fn handle_tray_event(&mut self, evt: TrayEvent, cx: &mut Context<Self>) {
+        match evt {
+            TrayEvent::PlayPause => self.toggle_playback(cx),
+            TrayEvent::Next => self.next_track(cx),
+            TrayEvent::Prev => self.prev_track(cx),
+            TrayEvent::ToggleWindow => {
+                // 窗口操作要 Window 句柄，从 App 里取当前窗口再进去操作
+                if let Some(handle) = cx.windows().into_iter().next() {
+                    let _ = cx.update_window(handle, |_, w, _cx| {
+                        let hwnd = get_window_hwnd(w) as isize;
+                        crate::platform::toggle_window(hwnd);
+                    });
+                }
+            }
+            TrayEvent::Quit => cx.quit(),
+        }
+        cx.notify();
+    }
+
+    /// 打开一个外部音频文件（命令行参数 / 第二个实例转发 / 文件关联双击都走这里）。
+    /// 库里已有同路径就直接播；没有就读元数据塞进"外部文件"文件夹再播。
+    fn open_external_file(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        // 1) 库里找得到 → 直接播
+        for (fi, folder) in self.folders.iter().enumerate() {
+            for (ti, track) in folder.tracks.iter().enumerate() {
+                if track.path == path {
+                    self.play(fi, ti, cx);
+                    return;
+                }
+            }
+        }
+        // 2) 不在库里 → 读标签建一个 Track，放进"外部文件"文件夹
+        if !path.exists() {
+            eprintln!("[open] 文件不存在：{}", path.display());
+            return;
+        }
+        let track = crate::audio::read_meta(&path);
+        let fi = if let Some(i) = self.folders.iter().position(|f| f.name == "外部文件") {
+            i
+        } else {
+            self.folders.insert(0, Folder {
+                name: "外部文件".to_string(),
+                expanded: true,
+                tracks: Vec::new(),
+            });
+            0
+        };
+        self.folders[fi].tracks.push(track);
+        self.folders[fi].expanded = true;
+        let ti = self.folders[fi].tracks.len() - 1;
+        eprintln!("[open] 外部文件已加入库并开始播放：{}", path.display());
+        self.play(fi, ti, cx);
+    }
+
+    /// 切换迷你播放器模式：窗口缩到 420×120（紧凑单行布局），退出时还原原尺寸
+    fn toggle_mini_mode(&mut self, _: &ClickEvent, w: &mut Window, cx: &mut Context<Self>) {
+        self.mini_mode = !self.mini_mode;
+        if self.mini_mode {
+            // 记住当前尺寸，退出时还原
+            self.normal_size = Some(w.bounds().size);
+            w.resize(size(px(420.0), px(120.0)));
+        } else if let Some(sz) = self.normal_size.take() {
+            w.resize(sz);
+        }
+        cx.notify();
+    }
+
+    /// 注册文件关联（写 HKCU 注册表），结果写进 assoc_msg 供设置面板显示
+    fn register_association(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        self.assoc_msg = Some(match crate::tray::register_file_association() {
+            Ok(()) => "已注册：右键音频文件 → 打开方式里能看到本程序".to_string(),
+            Err(e) => format!("注册失败：{e}"),
+        });
+        cx.notify();
     }
 
     /// 根据保存的路径自动加载音乐目录（优先使用缓存）
@@ -341,6 +561,9 @@ impl MusicPlayer {
             settings_open: self.settings_open,
             music_folders: self.music_folder_paths.iter().map(|s| s.to_string()).collect(),
             cached_folders: self.folders.clone(),  // 同步缓存
+            shuffle: self.shuffle,
+            repeat: self.repeat.as_str().to_string(),
+            volume: self.volume as f32,
         };
         settings.save();
     }
@@ -470,6 +693,125 @@ impl MusicPlayer {
             self.active_tab = tab;
             cx.notify();
         }
+    }
+
+    /// 切换随机播放
+    fn toggle_shuffle(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        self.shuffle = !self.shuffle;
+        self.save_settings(cx);
+        cx.notify();
+    }
+
+    /// 展开/收起播放队列面板（第三组 UI）
+    fn toggle_queue(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        self.queue_open = !self.queue_open;
+        cx.notify();
+    }
+
+    /// 歌词字号档位增减（第三组 UI：只影响显示，不落盘）
+    fn lyric_font_step_change(&mut self, delta: i32, cx: &mut Context<Self>) {
+        self.lyric_font_step = (self.lyric_font_step + delta).clamp(-1, 2);
+        cx.notify();
+    }
+
+    /// 切换歌词居中 / 左对齐（第三组 UI）
+    fn toggle_lyric_align(&mut self, cx: &mut Context<Self>) {
+        self.lyric_centered = !self.lyric_centered;
+        cx.notify();
+    }
+
+    /// 记录一次播放到"最近播放"（置顶去重，最多留 50 条）
+    fn push_recent(&mut self, fi: usize, ti: usize) {
+        self.recent.retain(|&(f, t)| !(f == fi && t == ti));
+        self.recent.insert(0, (fi, ti));
+        self.recent.truncate(50);
+    }
+
+    /// 取"接下来"的曲目列表（队列面板用）：从当前曲目往后按顺序取，最多 30 首。
+    /// 注意：这里刻意不看随机/循环模式，面板只是展示"顺序上的下一批"，避免和播放逻辑耦合。
+    fn upcoming_list(&self, limit: usize) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        if let Some((mut fi, mut ti)) = self.current {
+            while out.len() < limit {
+                match self.next_sequential(fi, ti) {
+                    Some((nf, nt)) => {
+                        fi = nf; ti = nt;
+                        if let Some(track) = self.folders.get(fi).and_then(|f| f.tracks.get(ti)) {
+                            out.push((
+                                track.title.clone(),
+                                track.artist.clone(),
+                                crate::audio::fmt_time(track.duration),
+                            ));
+                        }
+                    }
+                    None => break,
+                }
+            }
+            // 开了列表循环时，把开头几首补到队尾，让面板看起来是"会循环的队列"
+            if self.repeat == RepeatMode::All && !out.is_empty() {
+                'outer: for (f, folder) in self.folders.iter().enumerate() {
+                    for (t, track) in folder.tracks.iter().enumerate() {
+                        if out.len() >= limit { break 'outer; }
+                        // 跳过当前曲目自己
+                        if Some((f, t)) == self.current { continue; }
+                        out.push((
+                            track.title.clone(),
+                            track.artist.clone(),
+                            crate::audio::fmt_time(track.duration),
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// 循环切换循环模式：顺序播放 → 列表循环 → 单曲循环 → 顺序播放
+    fn cycle_repeat(&mut self, _: &ClickEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        self.repeat = match self.repeat {
+            RepeatMode::Off => RepeatMode::All,
+            RepeatMode::All => RepeatMode::One,
+            RepeatMode::One => RepeatMode::Off,
+        };
+        self.save_settings(cx);
+        cx.notify();
+    }
+
+    /// 音量滑块变化：读到新音量 → 应用到播放后端 → 持久化
+    fn on_volume_change(&mut self, cx: &mut Context<Self>) {
+        self.volume = self.volume_slider.read(cx).value().start() as f64;
+        self.player.set_volume(self.volume);
+        self.save_settings(cx);
+        cx.notify();
+    }
+
+    /// 按比例跳转（进度条点击/拖拽：把点击位置换算成 0~1 的比例传进来）
+    fn seek_fraction(&mut self, frac: f32, cx: &mut Context<Self>) {
+        let total = self.total_time();
+        if total <= 0.0 { return; }
+        let target = (frac.clamp(0.0, 1.0) as f64) * total;
+        self.seek_to(target, cx);
+    }
+
+    /// 跳转到指定秒数：调用后端 seek，并把本地的进度基准同步过去，
+    /// 否则定时器算出来的进度会立刻跳回旧位置。
+    fn seek_to(&mut self, secs: f64, cx: &mut Context<Self>) {
+        let total = self.total_time();
+        let mut target = secs.max(0.0);
+        if total > 0.0 && target > total {
+            target = total;
+        }
+        self.player.seek(target);
+        // 本地进度基准 = 新位置，UI 立即反映
+        self.play_offset = target;
+        self.play_start = if self.playing { Some(Instant::now()) } else { None };
+        // 歌词行也跟着跳
+        if let Some(ref lyrics) = self.lyrics {
+            if let Some(line) = lyrics.find_line((target * 1000.0) as u32) {
+                self.lyric_line = Some(line);
+            }
+        }
+        cx.notify();
     }
 
     /// 打开"编辑歌曲信息"弹窗，预填当前曲目的标题/歌手/专辑
@@ -765,7 +1107,45 @@ impl MusicPlayer {
             .map(|(i, _)| (i, 0))
     }
 
-    fn next_idx(&self, fi: usize, ti: usize) -> Option<(usize, usize)> {
+    /// 所有可播放曲目的 (fi, ti) 扁平列表（随机播放用）
+    fn all_indices(&self) -> Vec<(usize, usize)> {
+        let mut v = Vec::new();
+        for (fi, f) in self.folders.iter().enumerate() {
+            for ti in 0..f.tracks.len() {
+                v.push((fi, ti));
+            }
+        }
+        v
+    }
+
+    /// 随机取一首（尽量避开当前这首）。用系统时间纳秒做种子，不引第三方随机库。
+    fn random_idx(&self, cur: Option<(usize, usize)>) -> Option<(usize, usize)> {
+        let all = self.all_indices();
+        if all.is_empty() { return None; }
+        if all.len() == 1 { return Some(all[0]); }
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as usize + d.as_secs() as usize)
+            .unwrap_or(0);
+        let mut idx = seed % all.len();
+        if Some(all[idx]) == cur {
+            // 恰好又随机到当前这首 → 顺延一首，保证"下一首"一定换歌
+            idx = (idx + 1) % all.len();
+        }
+        Some(all[idx])
+    }
+
+    /// 最后一首（列表循环时"最后一首的下一首"回到开头用得到）
+    fn last(&self) -> Option<(usize, usize)> {
+        for fi in (0..self.folders.len()).rev() {
+            let n = self.folders[fi].tracks.len();
+            if n > 0 { return Some((fi, n - 1)); }
+        }
+        None
+    }
+
+    /// 顺序取下一首（不处理循环）
+    fn next_sequential(&self, fi: usize, ti: usize) -> Option<(usize, usize)> {
         let mut fi = fi;
         let mut ti = ti + 1;
         while fi < self.folders.len() {
@@ -778,7 +1158,8 @@ impl MusicPlayer {
         None
     }
 
-    fn prev_idx(&self, fi: usize, ti: usize) -> Option<(usize, usize)> {
+    /// 顺序取上一首（不处理循环）
+    fn prev_sequential(&self, fi: usize, ti: usize) -> Option<(usize, usize)> {
         if ti > 0 { return Some((fi, ti - 1)); }
         if fi > 0 {
             let pf = fi - 1;
@@ -786,6 +1167,22 @@ impl MusicPlayer {
                 return Some((pf, self.folders[pf].tracks.len() - 1));
             }
         }
+        None
+    }
+
+    /// 下一首：随机优先；否则顺序；顺序到头且开了列表循环就回到第一首
+    fn next_idx(&self, fi: usize, ti: usize) -> Option<(usize, usize)> {
+        if self.shuffle { return self.random_idx(Some((fi, ti))); }
+        if let Some(next) = self.next_sequential(fi, ti) { return Some(next); }
+        if self.repeat == RepeatMode::All { return self.first(); }
+        None
+    }
+
+    /// 上一首：随机优先；否则顺序；顺序到头且开了列表循环就跳到最后一首
+    fn prev_idx(&self, fi: usize, ti: usize) -> Option<(usize, usize)> {
+        if self.shuffle { return self.random_idx(Some((fi, ti))); }
+        if let Some(prev) = self.prev_sequential(fi, ti) { return Some(prev); }
+        if self.repeat == RepeatMode::All { return self.last(); }
         None
     }
 
@@ -853,6 +1250,8 @@ impl MusicPlayer {
         let is_same_track = self.current == Some((fi, ti));
         
         self.current = Some((fi, ti));
+        // 记一笔播放历史（第三组 UI 的「最近」tab 用）
+        self.push_recent(fi, ti);
         self.playing = true;
         self.play_offset = 0.0;
         self.play_start = Some(Instant::now());
@@ -897,6 +1296,13 @@ impl MusicPlayer {
     }
 
     fn spawn_progress_updater(&mut self, cx: &mut Context<Self>) {
+        // 定时器循环只启动一次：整个应用跑一个 500ms 进度循环 + 一个 150ms 均衡器循环即可。
+        // 旧实现每次 play 都新起两个循环，切歌多了会累积出几十个定时器在空转。
+        if self.progress_timer_started {
+            return;
+        }
+        self.progress_timer_started = true;
+
         // 进度更新定时器（500ms）
         cx.spawn(async move |this, cx| {
             loop {
@@ -923,10 +1329,36 @@ impl MusicPlayer {
                             // （在两句之间时不切换，还没开始唱时保持 None）
                         }
                         
+                        // ── 播完一首的处理（这是"循环模式"真正生效的地方）──
                         if total > 0.0 && progress >= total {
-                            this.playing = false;
-                            this.play_offset = 0.0;
-                            this.play_start = None;
+                            match this.repeat {
+                                // 单曲循环：重放当前这首
+                                RepeatMode::One => {
+                                    if let Some((fi, ti)) = this.current {
+                                        this.play(fi, ti, cx);
+                                    } else {
+                                        this.playing = false;
+                                    }
+                                }
+                                // 顺序 / 列表循环：都走"下一首"，
+                                // next_idx 内部已处理"列表循环时回绕到第一首"
+                                _ => {
+                                    let cur = this.current;
+                                    let next = match cur {
+                                        Some((fi, ti)) => this.next_idx(fi, ti),
+                                        None => None,
+                                    };
+                                    match next {
+                                        Some((f, t)) => this.play(f, t, cx),
+                                        // 已是最后一首且没开列表循环 → 停在末尾
+                                        None => {
+                                            this.playing = false;
+                                            this.play_offset = 0.0;
+                                            this.play_start = None;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     cx.notify();
@@ -1057,7 +1489,6 @@ impl Render for MusicPlayer {
         let playing = self.playing;
         let cur_t = self.current_progress();
         let tot_t = self.total_time();
-        let prog = if tot_t > 0.0 { cur_t / tot_t } else { 0.0 };
         let position_ms = (cur_t * 1000.0) as u32;
 
         // 计算侧边栏列表可用高度（窗口高度 - topbar - 标题栏 - tabs）
@@ -1074,6 +1505,11 @@ impl Render for MusicPlayer {
         let settings_width = (w.viewport_size().width * 0.26)
             .max(px(260.0))
             .min(px(360.0));
+
+        // 队列面板宽度响应式：比设置面板略窄（22%，[240, 320]）
+        let queue_width = (w.viewport_size().width * 0.22)
+            .max(px(240.0))
+            .min(px(320.0));
         
         // ── 搜索输入框懒初始化 ──
         // InputState::new 需要窗口句柄，故推迟到 render 首次拿到 &mut Window 时创建。
@@ -1112,6 +1548,8 @@ impl Render for MusicPlayer {
             &self.active_tab,
             &self.expanded_albums,
             &self.expanded_artists,
+            &self.recent,
+            self.album_grid,
             sidebar_width,
             cx,
         );
@@ -1121,15 +1559,41 @@ impl Render for MusicPlayer {
         let lyrics_data = self.lyrics.as_ref();
         let lyric_line_idx = self.lyric_line;
         
-        let center = ui::center::build_center(&title, &artist, &album, &t, cx, lyrics_data, lyric_line_idx, position_ms, self.current_cover.as_ref());
-        let player_bar = ui::player::build_player_bar(playing, prog, cur_t, tot_t, &t, cx);
+        let center = ui::center::build_center(
+            &title, &artist, &album, &t, cx, lyrics_data, lyric_line_idx, position_ms,
+            self.current_cover.as_ref(), self.lyric_font_step, self.lyric_centered,
+        );
+        // 进度条边界共享槽：player.rs 里的 canvas 在 paint 阶段写入真实矩形，
+        // 点击/拖拽 seek 时再据此把窗口坐标换算成 0~1 比例（只在本帧内共享即可）。
+        let track_bounds: Arc<Mutex<Option<Bounds<Pixels>>>> = Arc::new(Mutex::new(None));
+        let player_bar = ui::player::build_player_bar(
+            playing, cur_t, tot_t, self.shuffle, self.queue_open, track_bounds, &t, cx,
+        );
         let settings_panel = ui::settings::build_settings(
             opacity, opacity_enabled, &self.slider,
             &t, theme_mode,
             &self.bg_slider, self.bg_image_blur,
+            self.shuffle, self.repeat, &self.volume_slider, self.volume as f32,
+            self.assoc_msg.clone(),
             settings_width,
             cx,
         );
+        // 播放队列面板（第三组 UI）：展开时插在中间区和设置面板之间
+        let queue_panel = if self.queue_open {
+            let upcoming = self.upcoming_list(30);
+            let cur_title = self.current
+                .and_then(|(fi, ti)| self.folders.get(fi).and_then(|f| f.tracks.get(ti)))
+                .map(|tr| tr.title.clone()).unwrap_or_else(|| "未播放".to_string());
+            let cur_artist = self.current
+                .and_then(|(fi, ti)| self.folders.get(fi).and_then(|f| f.tracks.get(ti)))
+                .map(|tr| tr.artist.clone()).unwrap_or_default();
+            Some(ui::queue::build_queue_panel(
+                playing, self.eq_phase, &cur_title, &cur_artist, &upcoming,
+                &t, queue_width, cx,
+            ))
+        } else {
+            None
+        };
 
         // ── 窗口视觉分层总览（透明 / 背景图）──
         // 从下到上共两层：
@@ -1179,6 +1643,8 @@ impl Render for MusicPlayer {
                 .child(center)
                 .child(player_bar))
             .when(settings_open, |this| this.child(settings_panel));
+        // 播放队列面板放在设置面板左侧（两个都开时：中间区 | 队列 | 设置）
+        let body = if let Some(panel) = queue_panel { body.child(panel) } else { body };
 
         // 内容层：垂直排列 topbar + body
         // HTML 中 .app 用 --bg-surface (#12121a)，不是 --bg-base (#0a0a0f)
@@ -1190,9 +1656,16 @@ impl Render for MusicPlayer {
         } else {
             content.bg(t.surface)
         };
-        let content = content
-            .child(topbar)
-            .child(body);
+        // 迷你模式：整块内容换成紧凑单行布局（没有侧边栏 / 设置 / 大封面）
+        let content = if self.mini_mode {
+            let mini = ui::mini::build_mini_player(
+                playing, cur_t, tot_t, &title, &artist,
+                self.current_cover.as_ref(), &t, cx,
+            );
+            content.child(mini)
+        } else {
+            content.child(topbar).child(body)
+        };
 
         // 根容器
         let root = div().id("root").size_full().relative();
@@ -1280,6 +1753,23 @@ impl gpui::AssetSource for Assets {
 // ── 入口 ──
 
 fn main() {
+    // ── 单实例 + 命令行文件（第四组）──
+    // 用法：Sonic.exe "D:\music\a.mp3" → 启动后直接播这首
+    //      已有实例在跑 → 把路径交给它，自己立刻退出（避免开出一堆窗口）
+    let cli_file = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    if !crate::tray::is_first_instance() {
+        if let Some(path) = cli_file {
+            crate::tray::write_pending_file(&path);
+        }
+        eprintln!("[main] 已有实例在运行，本次启动退出");
+        return;
+    }
+    // 第一个实例：把自己的命令行文件也塞进同一个"待打开"通道，
+    // 交给 new() 里那个每秒轮询统一处理（这样只有一条播放路径，不用写两份）。
+    if let Some(path) = cli_file {
+        crate::tray::write_pending_file(&path);
+    }
+
     Application::new()
         .with_assets(Assets)
         .run(move |cx| {
